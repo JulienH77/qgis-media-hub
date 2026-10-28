@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.2 — 2026-10-28
+- Replace `subprocess.Popen` with Qt `QProcess.startDetached()` to start an installed VLC instance without a shell, keeping the executable path and media URL separate.
+- Use scoped Qt enum names supported in QGIS 3.44 (Qt 5.15), reducing Qt 6 migration warnings without claiming QGIS 4 compatibility.
+- Remove unused imports and update English publication metadata.
+- No change to media decoding, radio feeds, or proxy transport. Radio playback is still experimental.
+
 ## 1.3.1 — 2026-10-28
 - Prepare official QGIS repository packaging and English metadata.
 - Credit JulienH77 in the plugin interface, metadata, README and MIT LICENSE.

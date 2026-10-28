@@ -4,7 +4,7 @@
 
 **Author:** [JulienH77](https://github.com/JulienH77)  
 **License:** MIT (see [LICENSE](LICENSE))  
-**Version:** 1.3.1 — experimental
+**Version:** 1.3.2 — experimental
 
 ## Features
 

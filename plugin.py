@@ -46,7 +46,7 @@ class MediaHubPlugin:
                 from .dock import MediaHubDock
                 self.dock = MediaHubDock(self.iface.mainWindow())
                 self.dock.visibilityChanged.connect(self._visibility_changed)
-                self.iface.addDockWidget(Qt.RightDockWidgetArea, self.dock)
+                self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock)
             except Exception as exc:
                 self.action.blockSignals(True)
                 self.action.setChecked(False)

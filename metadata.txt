@@ -2,7 +2,7 @@
 name=Media Hub
 qgisMinimumVersion=3.44
 qgisMaximumVersion=3.44.99
-version=1.3.1
+version=1.3.2
 author=JulienH77
 email=julien.houziaux77183@gmail.com
 description=Play local videos, browse the web, listen to live radio and keep notes in a native-looking QGIS dock panel.
@@ -16,7 +16,8 @@ hasProcessingProvider=False
 homepage=https://github.com/JulienH77/qgis-media-hub#readme
 tracker=https://github.com/JulienH77/qgis-media-hub/issues
 repository=https://github.com/JulienH77/qgis-media-hub
-changelog=1.3.1 - Publication metadata and English documentation; author credits and PNG icon; no media playback engine changes.
+changelog=1.3.2 - Replace subprocess with Qt QProcess for external VLC; use scoped Qt enums for compatibility and remove unused imports.
+    1.3.1 - Publication metadata and English documentation; author credits and PNG icon; no media playback engine changes.
     1.3.0 - Handle HTTP redirects in the optional radio relay.
     1.2.0 - Add QGIS network relay for radio and diagnostics.
     1.1.0 - Add alternative radio streams and local sound test.

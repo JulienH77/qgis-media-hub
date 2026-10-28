@@ -1,6 +1,6 @@
 # Media Hub — extension QGIS 3.44
 
-**Auteur : JulienH77** · **Version : 1.3.1 (expérimentale)** · **Licence : MIT**.
+**Auteur : JulienH77** · **Version : 1.3.2 (expérimentale)** · **Licence : MIT**.
 
 Une extension à l'interface claire qui rassemble quatre onglets dans un panneau QGIS :
 
@@ -17,7 +17,7 @@ Dans QGIS, utiliser **Extensions → Media Hub** ou la barre d'outils Media Hub.
 
 ## Limites
 
-La version 1.3 avait un problème de radio identifié sur un réseau professionnel ; le correctif de redirection n'a pas encore été confirmé opérationnel dans cette situation. La version 1.3.1 concerne la **publication et la reconnaissance de l'auteur**, pas le moteur radio. Il faut la tester réellement sur QGIS avant de cocher la case correspondante sur le site officiel.
+La version 1.3 avait un problème de radio identifié sur un réseau professionnel ; le correctif de redirection n'a pas encore été confirmé opérationnel dans cette situation. La version 1.3.2 concerne la **publication et la reconnaissance de l'auteur**, pas le moteur radio. Il faut la tester réellement sur QGIS avant de cocher la case correspondante sur le site officiel.
 
 Page du projet (après création du dépôt public) : https://github.com/JulienH77/qgis-media-hub
 

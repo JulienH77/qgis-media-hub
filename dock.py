@@ -7,11 +7,10 @@ Le navigateur et les moteurs multimédias sont chargés à la demande : l'absenc
 import json
 import os
 import shutil
-import subprocess
 from pathlib import Path
 from urllib.parse import quote_plus, urlparse
 
-from qgis.PyQt.QtCore import Qt, QSettings, QTimer, QUrl
+from qgis.PyQt.QtCore import Qt, QProcess, QProcessEnvironment, QSettings, QTimer, QUrl
 from qgis.PyQt.QtGui import QDesktopServices, QKeySequence
 from qgis.PyQt.QtWidgets import (
     QCheckBox, QComboBox, QDockWidget, QDoubleSpinBox, QFileDialog, QFrame,
@@ -107,7 +106,7 @@ class FloatPlayer(QWidget):
     """PiP léger qui accueille la *même* surface vidéo, sans second lecteur."""
 
     def __init__(self, dock):
-        super().__init__(None, Qt.Window | Qt.WindowStaysOnTopHint)
+        super().__init__(None, Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint)
         self.dock = dock
         self.setWindowTitle("Media Hub — Vidéo flottante")
         self.setMinimumSize(330, 220)
@@ -141,7 +140,7 @@ class FloatPlayer(QWidget):
         self._esc = QShortcut(QKeySequence("Escape"), self)
         self._esc.activated.connect(self._on_escape)
         self._returning = False
-        self.setAttribute(Qt.WA_DeleteOnClose, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
 
     def toggle_fullscreen(self):
         if self.isFullScreen():
@@ -172,9 +171,9 @@ class MediaHubDock(QDockWidget):
     def __init__(self, parent=None):
         super().__init__("Media Hub", parent)
         self.setObjectName("qgisMediaHubDock")
-        self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
-        self.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetClosable |
-                         QDockWidget.DockWidgetFloatable)
+        self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+        self.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable | QDockWidget.DockWidgetFeature.DockWidgetClosable |
+                         QDockWidget.DockWidgetFeature.DockWidgetFloatable)
         self.setMinimumWidth(330)
         self.resize(475, 680)
         self.prefs = QSettings()
@@ -273,22 +272,22 @@ class MediaHubDock(QDockWidget):
         self.video_holder_layout.setContentsMargins(0, 0, 0, 0)
         self.video_holder_layout.setSpacing(0)
         self.video_placeholder = label("Ouvre une vidéo pour commencer.")
-        self.video_placeholder.setAlignment(Qt.AlignCenter)
+        self.video_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_placeholder.setStyleSheet("background: #eef1f4; color: #74818d; border: 1px solid #dce2e6;")
         self.video_placeholder.setMinimumHeight(175)
         self.video_holder_layout.addWidget(self.video_placeholder)
         self.video_holder.setMinimumHeight(185)
-        self.video_holder.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.video_holder.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         lay.addWidget(self.video_holder, 1)
 
         # Déjà enfant du dock AVANT de créer le HWND VLC : sinon Qt pourrait
         # recréer le handle natif au premier affichage (vidéo noire).
         self.vlc_canvas = QFrame(self.video_holder)
-        self.vlc_canvas.setAttribute(Qt.WA_NativeWindow, True)
-        self.vlc_canvas.setAttribute(Qt.WA_DontCreateNativeAncestors, True)
+        self.vlc_canvas.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        self.vlc_canvas.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors, True)
         self.vlc_canvas.setStyleSheet("background: #121517;")
         self.vlc_canvas.setMinimumHeight(150)
-        self.vlc_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.vlc_canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.video_holder_layout.addWidget(self.vlc_canvas)
         self.vlc_canvas.hide()
         self.qt_canvas = None
@@ -302,7 +301,7 @@ class MediaHubDock(QDockWidget):
         seek_row = QHBoxLayout()
         self.elapsed = label("00:00")
         self.total = label("00:00")
-        self.seek = QSlider(Qt.Horizontal)
+        self.seek = QSlider(Qt.Orientation.Horizontal)
         self.seek.setRange(0, 0)
         self.seek.sliderPressed.connect(self._seek_press)
         self.seek.sliderReleased.connect(self._seek_release)
@@ -334,7 +333,7 @@ class MediaHubDock(QDockWidget):
         bottom.addWidget(make_button("Plein écran", self.fullscreen_video, "Plein écran vidéo ; Échap pour quitter"))
         self.mute_btn = make_button("Muet", self._toggle_mute)
         bottom.addWidget(self.mute_btn)
-        self.volume_slider = QSlider(Qt.Horizontal)
+        self.volume_slider = QSlider(Qt.Orientation.Horizontal)
         self.volume_slider.setRange(0, 200)
         self.volume_slider.setToolTip("Volume VLC de 0 à 200 %. Au-delà de 100 %, risque de saturation.")
         self.volume_slider.setValue(int(self.prefs.value(SETTINGS + "volume", 80)))
@@ -349,7 +348,6 @@ class MediaHubDock(QDockWidget):
         self.tabs.addTab(page, "Vidéo")
 
     def _initialize_player(self):
-        from .vlc_backend import VLCBackendError
         dll_path = find_vlc()
         self.engine_detail = "VLC 64 bits non trouvé."
         if dll_path:
@@ -370,7 +368,7 @@ class MediaHubDock(QDockWidget):
                 self.qt_media_content = QMediaContent
                 self.qt_canvas = QVideoWidget(self.video_holder)
                 self.qt_canvas.setMinimumHeight(150)
-                self.qt_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+                self.qt_canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
                 self.video_holder_layout.addWidget(self.qt_canvas)
                 self.qt_canvas.hide()
                 self.player = QtMedia(self, QtMedia.VideoSurface)
@@ -698,7 +696,7 @@ class MediaHubDock(QDockWidget):
         favorites_row = QHBoxLayout()
         favorites_row.addWidget(label("Favoris", True))
         self.favorites_combo = QComboBox()
-        self.favorites_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.favorites_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         favorites_row.addWidget(self.favorites_combo, 1)
         favorites_row.addWidget(make_button("Aller", self._favorite_go))
         favorites_row.addWidget(make_button("+", self._favorite_add, "Enregistrer l'adresse actuelle"))
@@ -709,7 +707,7 @@ class MediaHubDock(QDockWidget):
         self.web_container.setContentsMargins(0, 0, 0, 0)
         lay.addLayout(self.web_container, 1)
         self.web_placeholder = label("Le navigateur Chromium s'initialisera à l'ouverture de cet onglet.", True)
-        self.web_placeholder.setAlignment(Qt.AlignCenter)
+        self.web_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.web_container.addWidget(self.web_placeholder)
         self.web_info = label("Qt WebEngine : un navigateur intégré ne sera pas forcément aussi rapide que Firefox.", True)
         lay.addWidget(self.web_info)
@@ -726,7 +724,7 @@ class MediaHubDock(QDockWidget):
                 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineSettings
             self.web = QWebEngineView(self.browser_page)
             self.web.setMinimumHeight(250)
-            self.web.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            self.web.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             st = self.web.settings()
             st.setAttribute(QWebEngineSettings.PluginsEnabled, True)
             st.setAttribute(QWebEngineSettings.JavascriptEnabled, True)
@@ -841,7 +839,7 @@ class MediaHubDock(QDockWidget):
         if request.toggleOn():
             request.accept()
             if self._web_full is None and self.web:
-                self._web_full = QWidget(None, Qt.Window)
+                self._web_full = QWidget(None, Qt.WindowType.Window)
                 self._web_full.setWindowTitle("Media Hub — Navigateur plein écran")
                 self._web_full.setStyleSheet("background: white;")
                 holder = QVBoxLayout(self._web_full)
@@ -918,7 +916,7 @@ class MediaHubDock(QDockWidget):
         lay.addLayout(tools)
         volume_row = QHBoxLayout()
         volume_row.addWidget(label("Volume"))
-        self.radio_volume = QSlider(Qt.Horizontal)
+        self.radio_volume = QSlider(Qt.Orientation.Horizontal)
         self.radio_volume.setRange(0, self.volume_slider.maximum())
         self.radio_volume.setValue(self.volume_slider.value())
         self.radio_volume.setToolTip("Volume de la radio, avec amplification à 200 % si moteur VLC")
@@ -931,7 +929,7 @@ class MediaHubDock(QDockWidget):
         volume_row.addWidget(self.radio_volume_label)
         lay.addLayout(volume_row)
         line = QFrame()
-        line.setFrameShape(QFrame.HLine)
+        line.setFrameShape(QFrame.Shape.HLine)
         lay.addWidget(line)
         lay.addWidget(label("Ajouter une station personnelle"))
         self.custom_name = QLineEdit()
@@ -946,9 +944,9 @@ class MediaHubDock(QDockWidget):
         lay.addLayout(extras)
         self.radio_status = label("Choisis une station puis clique sur Écouter.", True)
         lay.addWidget(self.radio_status)
-        self.radio_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.radio_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.radio_detail = label("Moteur non initialisé", True)
-        self.radio_detail.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.radio_detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         lay.addWidget(self.radio_detail)
         tools2 = QHBoxLayout()
         tools2.addWidget(make_button("Tester le son", self.test_radio_sound,
@@ -1165,17 +1163,25 @@ class MediaHubDock(QDockWidget):
         if not exe:
             self._set_radio_status("VLC.exe est introuvable sur ce PC.", True)
             return
+        # Qt lance l'exécutable VLC identifié sans interpréteur de commandes.
+        # Les arguments restent séparés ; aucun texte d'URL n'est exécuté.
+        process = QProcess(self)
+        process.setProgram(exe)
+        process.setArguments([url])
+        clean_env = QProcessEnvironment.systemEnvironment()
+        # Évite les conflits de DLL Qt et de modules de QGIS/OSGeo4W.
+        for key in ("QT_PLUGIN_PATH", "QT_QPA_PLATFORM_PLUGIN_PATH",
+                    "PYTHONPATH", "PYTHONHOME", "VLC_PLUGIN_PATH"):
+            clean_env.remove(key)
+        process.setProcessEnvironment(clean_env)
         try:
-            # Ne pas lancer par le shell et ne pas embarquer de donnees externes.
-            env = os.environ.copy()
-            # Une application VLC distincte n'a pas a reutiliser les chemins Qt
-            # ou Python d'OSGeo4W/QGIS (risque de conflit de DLL Qt).
-            for key in ("QT_PLUGIN_PATH", "QT_QPA_PLATFORM_PLUGIN_PATH",
-                        "PYTHONPATH", "PYTHONHOME", "VLC_PLUGIN_PATH"):
-                env.pop(key, None)
-            subprocess.Popen([exe, url], close_fds=True, env=env)
+            result = process.startDetached()
+            started = bool(result[0] if isinstance(result, tuple) else result)
+            if not started:
+                self._set_radio_status("Impossible de lancer VLC (échec du processus Qt).", True)
+                return
             self._set_radio_status("Flux ouvert dans VLC (fenêtre externe).")
-        except OSError as exc:
+        except (OSError, RuntimeError) as exc:
             self._set_radio_status("Impossible de lancer VLC : {}".format(exc), True)
 
     def test_radio_sound(self):
@@ -1264,7 +1270,7 @@ class MediaHubDock(QDockWidget):
 
     def _clear_notes(self):
         if QMessageBox.question(self, "Effacer les notes", "Effacer toutes les notes enregistrées ?",
-                                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes:
+                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
             self.notes.clear()
             self._save_notes()
 
@@ -1275,7 +1281,7 @@ class MediaHubDock(QDockWidget):
             self._initialize_web()
 
     def _settings_dialog(self):
-        message = ("MEDIA HUB 1.3.1 — QGIS 3.44\n"
+        message = ("MEDIA HUB 1.3.2 — QGIS 3.44\n"
                    "Auteur : JulienH77  |  Licence : MIT\n"
                    "Projet : github.com/JulienH77/qgis-media-hub\n\n"
                    "VIDÉO / RADIO\nMoteur : {}\n{}\n\n"

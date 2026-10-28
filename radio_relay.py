@@ -51,7 +51,7 @@ class QgisRadioRelay(QObject):
         from qgis.core import QgsNetworkAccessManager
         self.manager = QgsNetworkAccessManager.instance()
         self.server = QTcpServer(self)
-        if not self.server.listen(QHostAddress.LocalHost, 0):
+        if not self.server.listen(QHostAddress.SpecialAddress.LocalHost, 0):
             raise RuntimeError('Impossible de creer le relais local (127.0.0.1).')
         self.server.newConnection.connect(self._incoming)
         self.source = ''
@@ -120,17 +120,17 @@ class QgisRadioRelay(QObject):
         if self.socket is None or generation != self._generation:
             return
         outgoing = QNetworkRequest(QUrl(url))
-        outgoing.setRawHeader(b'User-Agent', b'Mozilla/5.0 (compatible; QGIS-Media-Hub/1.3)')
+        outgoing.setRawHeader(b'User-Agent', b'Mozilla/5.0 (compatible; QGIS-Media-Hub/1.3.2)')
         outgoing.setRawHeader(b'Accept', b'audio/*,application/octet-stream,*/*')
         outgoing.setRawHeader(b'Accept-Encoding', b'identity')
         outgoing.setRawHeader(b'Icy-MetaData', b'0')
         # Important : les redirections sont gerees ici, explicitement.
         # On ne suppose pas que le NetworkAccessManager QGIS les suit.
         if hasattr(QNetworkRequest, 'RedirectPolicyAttribute'):
-            outgoing.setAttribute(QNetworkRequest.RedirectPolicyAttribute,
-                                  QNetworkRequest.ManualRedirectPolicy)
+            outgoing.setAttribute(QNetworkRequest.Attribute.RedirectPolicyAttribute,
+                                  QNetworkRequest.RedirectPolicy.ManualRedirectPolicy)
         elif hasattr(QNetworkRequest, 'FollowRedirectsAttribute'):
-            outgoing.setAttribute(QNetworkRequest.FollowRedirectsAttribute, False)
+            outgoing.setAttribute(QNetworkRequest.Attribute.FollowRedirectsAttribute, False)
         reply = self.manager.get(outgoing)
         self.reply = reply
         try:
@@ -147,7 +147,7 @@ class QgisRadioRelay(QObject):
 
     @staticmethod
     def _status(reply):
-        value = reply.attribute(QNetworkRequest.HttpStatusCodeAttribute)
+        value = reply.attribute(QNetworkRequest.Attribute.HttpStatusCodeAttribute)
         try:
             return int(value) if value is not None else None
         except (TypeError, ValueError):
@@ -156,7 +156,7 @@ class QgisRadioRelay(QObject):
     def _follow_redirect(self, reply, generation):
         if not self._valid(reply, generation):
             return
-        target = reply.attribute(QNetworkRequest.RedirectionTargetAttribute)
+        target = reply.attribute(QNetworkRequest.Attribute.RedirectionTargetAttribute)
         target_text = target.toString() if target is not None and not target.isEmpty() else ''
         if not target_text:
             target_text = bytes(reply.rawHeader(b'Location')).decode('utf-8', 'replace').strip()
@@ -225,7 +225,7 @@ class QgisRadioRelay(QObject):
             self._metadata(reply, generation)
         if not self._valid(reply, generation):
             return
-        if reply.error() != QNetworkReply.NoError:
+        if reply.error() != QNetworkReply.NetworkError.NoError:
             self._failure('Reseau QGIS : {}'.format(reply.errorString()))
             return
         self._available(reply, generation)
