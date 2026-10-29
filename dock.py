@@ -10,12 +10,12 @@ import shutil
 from pathlib import Path
 from urllib.parse import quote_plus, urlparse
 
-from qgis.PyQt.QtCore import Qt, QProcess, QProcessEnvironment, QSettings, QTimer, QUrl
-from qgis.PyQt.QtGui import QDesktopServices, QKeySequence
+from qgis.PyQt.QtCore import Qt, QProcess, QProcessEnvironment, QSettings, QTimer, QUrl, QSize, QSignalBlocker
+from qgis.PyQt.QtGui import QDesktopServices, QKeySequence, QIcon, QPixmap, QPainter, QColor, QFont
 from qgis.PyQt.QtWidgets import (
     QCheckBox, QComboBox, QDockWidget, QDoubleSpinBox, QFileDialog, QFrame,
     QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QShortcut,
-    QSizePolicy, QSlider, QStackedWidget, QTabWidget, QTextEdit,
+    QSizePolicy, QSlider, QTabWidget, QTextEdit, QScrollArea, QGridLayout,
     QToolButton, QVBoxLayout, QWidget,
 )
 
@@ -121,10 +121,15 @@ class FloatPlayer(QWidget):
         buttons = QHBoxLayout()
         self.close_button = make_button("↩ QGIS", self.return_to_dock)
         buttons.addWidget(self.close_button)
-        buttons.addWidget(make_button("−10 s", lambda: dock.skip(-10000)))
+        back = make_button("−10", lambda: dock.skip(-10000), "Reculer de 10 secondes")
+        back.setFixedWidth(36)
+        buttons.addWidget(back)
         self.play_button = make_button("Pause", dock.toggle_play)
+        self.play_button.setMaximumWidth(67)
         buttons.addWidget(self.play_button)
-        buttons.addWidget(make_button("+10 s", lambda: dock.skip(10000)))
+        forward = make_button("+10", lambda: dock.skip(10000), "Avancer de 10 secondes")
+        forward.setFixedWidth(36)
+        buttons.addWidget(forward)
         self.speed_box = QDoubleSpinBox()
         self.speed_box.setRange(0.1, 5.0)
         self.speed_box.setSingleStep(0.1)
@@ -137,6 +142,23 @@ class FloatPlayer(QWidget):
         buttons.addWidget(self.speed_box)
         buttons.addWidget(make_button("⛶", self.toggle_fullscreen, "Plein écran / retour"))
         base.addLayout(buttons)
+        sound = QHBoxLayout()
+        sound.setSpacing(5)
+        sound.addWidget(QLabel("Son"))
+        self.volume = QSlider(Qt.Orientation.Horizontal)
+        self.volume.setRange(0, 200)
+        self.volume.setValue(dock.volume_slider.value())
+        self.volume.setToolTip("Volume 0–200 % (moteur VLC)")
+        self.volume.valueChanged.connect(dock.volume_slider.setValue)
+        dock.volume_slider.valueChanged.connect(self.volume.setValue)
+        sound.addWidget(self.volume, 1)
+        self.volume_value = QLabel("{} %".format(self.volume.value()))
+        self.volume.valueChanged.connect(lambda value: self.volume_value.setText("{} %".format(value)))
+        sound.addWidget(self.volume_value)
+        base.addLayout(sound)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._shortcuts = []
+        dock._register_video_shortcuts(self, self._shortcuts)
         self._esc = QShortcut(QKeySequence("Escape"), self)
         self._esc.activated.connect(self._on_escape)
         self._returning = False
@@ -199,6 +221,8 @@ class MediaHubDock(QDockWidget):
         self.web = None
         self._web_initialized = False
         self._web_full = None
+        self._station_tiles = []
+        self._video_shortcuts = []
         self._notes_timer = QTimer(self)
         self._notes_timer.setSingleShot(True)
         self._notes_timer.setInterval(650)
@@ -287,6 +311,7 @@ class MediaHubDock(QDockWidget):
         self.vlc_canvas.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors, True)
         self.vlc_canvas.setStyleSheet("background: #121517;")
         self.vlc_canvas.setMinimumHeight(150)
+        self.vlc_canvas.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.vlc_canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.video_holder_layout.addWidget(self.vlc_canvas)
         self.vlc_canvas.hide()
@@ -328,6 +353,26 @@ class MediaHubDock(QDockWidget):
         controls.addWidget(self.speed)
         lay.addLayout(controls)
 
+        tracks_row = QHBoxLayout()
+        tracks_row.addWidget(label("Audio"))
+        self.audio_tracks_combo = QComboBox()
+        self.audio_tracks_combo.setMinimumWidth(85)
+        self.audio_tracks_combo.setToolTip("Choisir une piste audio incluse dans le fichier")
+        self.audio_tracks_combo.currentIndexChanged.connect(self._choose_audio_track)
+        tracks_row.addWidget(self.audio_tracks_combo, 1)
+        tracks_row.addWidget(label("Sous-titres"))
+        self.subtitle_tracks_combo = QComboBox()
+        self.subtitle_tracks_combo.setMinimumWidth(85)
+        self.subtitle_tracks_combo.setToolTip("Activer ou désactiver une piste de sous-titres")
+        self.subtitle_tracks_combo.currentIndexChanged.connect(self._choose_subtitle_track)
+        tracks_row.addWidget(self.subtitle_tracks_combo, 1)
+        tracks_row.addWidget(make_button("SRT…", self._add_subtitle_file,
+                                         "Charger des sous-titres externes .srt, .ass ou .vtt"))
+        lay.addLayout(tracks_row)
+        self._reset_tracks()
+        lay.addWidget(label("Raccourcis (vidéo et PiP) : Espace lecture/pause · ←/→ ±10 s · ↑/↓ son · S vitesse 1× · Q/D ±0,1×", True))
+        self._register_video_shortcuts(self.vlc_canvas, self._video_shortcuts)
+
         bottom = QHBoxLayout()
         bottom.addWidget(make_button("PiP", self.float_video, "Mini-lecteur flottant toujours au premier plan"))
         bottom.addWidget(make_button("Plein écran", self.fullscreen_video, "Plein écran vidéo ; Échap pour quitter"))
@@ -354,6 +399,7 @@ class MediaHubDock(QDockWidget):
             try:
                 self.player = VLCBackend(self.vlc_canvas, dll_path, self)
                 self.engine = "vlc"
+                self.player.tracksChanged.connect(self._tracks_changed)
                 self.engine_detail = "VLC : " + dll_path
             except (Exception,) as exc:
                 self.engine_detail = "VLC détecté mais inutilisable : {}".format(exc)
@@ -367,6 +413,7 @@ class MediaHubDock(QDockWidget):
                     from PyQt5.QtMultimediaWidgets import QVideoWidget
                 self.qt_media_content = QMediaContent
                 self.qt_canvas = QVideoWidget(self.video_holder)
+                self._register_video_shortcuts(self.qt_canvas, self._video_shortcuts)
                 self.qt_canvas.setMinimumHeight(150)
                 self.qt_canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
                 self.video_holder_layout.addWidget(self.qt_canvas)
@@ -396,6 +443,92 @@ class MediaHubDock(QDockWidget):
         self._set_volume(self.volume_slider.value())
         self._set_speed(self.speed.value())
         self._set_video_status("Moteur : {}. {}".format(self.engine.upper(), "Prêt." if self.engine == "vlc" else "VLC recommandé."))
+
+    def _register_video_shortcuts(self, target, keep):
+        """Raccourcis limités à la zone vidéo ou à la fenêtre PiP active."""
+        commands = {
+            "Space": self.toggle_play,
+            "Left": lambda: self.skip(-10000),
+            "Right": lambda: self.skip(10000),
+            "Up": lambda: self._volume_step(5),
+            "Down": lambda: self._volume_step(-5),
+            "S": lambda: self.speed.setValue(1.0),
+            "Q": lambda: self._speed_step(-0.1),
+            "D": lambda: self._speed_step(0.1),
+        }
+        for sequence, callback in commands.items():
+            shortcut = QShortcut(QKeySequence(sequence), target)
+            shortcut.setContext(Qt.ShortcutContext.WindowShortcut if isinstance(target, FloatPlayer)
+                                else Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(callback)
+            keep.append(shortcut)
+
+    def _volume_step(self, delta):
+        self.volume_slider.setValue(max(0, min(200, self.volume_slider.value() + delta)))
+
+    def _speed_step(self, delta):
+        # Arrondi au dixième pour éviter les flottants 1.3000000000000003.
+        tenths = round(self.speed.value() * 10) + round(delta * 10)
+        self.speed.setValue(max(1, min(50, tenths)) / 10.0)
+
+    def _reset_tracks(self):
+        for combo, message in ((self.audio_tracks_combo, "Audio : chargement…"),
+                               (self.subtitle_tracks_combo, "Sous-titres : chargement…")):
+            with QSignalBlocker(combo):
+                combo.clear()
+                combo.addItem(message, -9999)
+                combo.setEnabled(False)
+
+    def _tracks_changed(self, audio, subtitles, selected_audio, selected_sub):
+        if self.current_kind != "video":
+            return
+        self._fill_tracks(self.audio_tracks_combo, audio, selected_audio, "Audio indisponible")
+        if not any(t[0] == -1 for t in subtitles):
+            subtitles = [(-1, "Désactivés")] + list(subtitles)
+        self._fill_tracks(self.subtitle_tracks_combo, subtitles, selected_sub, "Aucun sous-titre")
+
+    @staticmethod
+    def _fill_tracks(combo, tracks, current, empty):
+        with QSignalBlocker(combo):
+            combo.clear()
+            if not tracks:
+                combo.addItem(empty, -9999)
+                combo.setEnabled(False)
+                return
+            for track_id, name in tracks:
+                combo.addItem(name, track_id)
+            ix = combo.findData(current)
+            combo.setCurrentIndex(ix if ix >= 0 else 0)
+            combo.setEnabled(len(tracks) > 1)
+
+    def _add_subtitle_file(self):
+        if not self.player or self.engine != "vlc" or self.current_kind != "video":
+            self._set_video_status("Ouvre une vidéo avec VLC avant de charger un fichier SRT.", True)
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choisir des sous-titres", str(Path.home()),
+            "Sous-titres (*.srt *.ass *.ssa *.vtt *.sub);;Tous les fichiers (*)")
+        if not path:
+            return
+        if self.player.add_external_subtitle(path):
+            self._set_video_status("Sous-titres ajoutés : {}".format(os.path.basename(path)))
+            QTimer.singleShot(800, self.player._refresh_tracks)
+        else:
+            self._set_video_status("VLC n'a pas pu charger ce fichier de sous-titres.", True)
+
+    def _choose_audio_track(self, unused):
+        if self.engine == "vlc" and self.current_kind == "video" and self.player:
+            track = self.audio_tracks_combo.currentData()
+            if track is not None and int(track) != -9999:
+                if not self.player.set_audio_track(int(track)):
+                    self._set_video_status("Impossible d'activer cette piste audio.", True)
+
+    def _choose_subtitle_track(self, unused):
+        if self.engine == "vlc" and self.current_kind == "video" and self.player:
+            track = self.subtitle_tracks_combo.currentData()
+            if track is not None and int(track) != -9999:
+                if not self.player.set_subtitle_track(int(track)):
+                    self._set_video_status("Impossible d'activer ces sous-titres.", True)
 
     def _open_file(self):
         recent = str(self.prefs.value(SETTINGS + "last_directory", str(Path.home())) or str(Path.home()))
@@ -432,6 +565,9 @@ class MediaHubDock(QDockWidget):
         self.current_kind = mode
         self.current_source = (kind, source)
         self.current_duration = 0
+        self._reset_tracks()
+        if mode == "video" and self.engine != "vlc":
+            self._set_video_status("Pistes audio et sous-titres : VLC requis.")
         self.seek.setRange(0, 0)
         self.elapsed.setText("00:00")
         self.total.setText("00:00")
@@ -605,6 +741,8 @@ class MediaHubDock(QDockWidget):
         was_playing = self.player.state() == QMediaPlayer.PlayingState
         was_paused = self.player.state() == QMediaPlayer.PausedState
         position = self.player.position()
+        selected_audio = self.player.audio_track() if self.engine == "vlc" else -1
+        selected_sub = self.player.subtitle_track() if self.engine == "vlc" else -1
         self._moving = True
         if self.engine == "vlc" and self.current_source:
             self.player.stop()
@@ -624,17 +762,22 @@ class MediaHubDock(QDockWidget):
                 if was_playing or was_paused:
                     self.player.play()
                     # Attendre que VLC soit prêt pour replacer sa position de lecture.
-                    QTimer.singleShot(550, lambda: self._restore_position(position, was_paused))
+                    QTimer.singleShot(700, lambda: self._restore_position(
+                        position, was_paused, selected_audio, selected_sub))
             elif self.engine == "qt":
                 self.player.setVideoOutput(self.active_canvas)
             self._moving = False
         QTimer.singleShot(180, reconnect)
 
-    def _restore_position(self, position, paused):
+    def _restore_position(self, position, paused, selected_audio=-1, selected_sub=-1):
         if not self.player or self.current_kind != "video":
             return
         if position > 0 and self.player.isSeekable():
             self.player.setPosition(position)
+        if self.engine == "vlc":
+            if selected_audio >= 0:
+                self.player.set_audio_track(selected_audio)
+            self.player.set_subtitle_track(selected_sub)
         if paused:
             self.player.pause()
 
@@ -709,6 +852,9 @@ class MediaHubDock(QDockWidget):
         self.web_placeholder = label("Le navigateur Chromium s'initialisera à l'ouverture de cet onglet.", True)
         self.web_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.web_container.addWidget(self.web_placeholder)
+        self.web_fallback = make_button("Ouvrir le site dans mon navigateur ↗", self._web_external,
+                                        "Fonctionne même si Chromium n'est pas disponible dans QGIS")
+        lay.addWidget(self.web_fallback)
         self.web_info = label("Qt WebEngine : un navigateur intégré ne sera pas forcément aussi rapide que Firefox.", True)
         lay.addWidget(self.web_info)
         self.tabs.addTab(self.browser_page, "Web")
@@ -742,10 +888,15 @@ class MediaHubDock(QDockWidget):
             self._navigate(str(self.prefs.value(SETTINGS + "web_last", "https://www.youtube.com/") or "https://www.youtube.com/"))
         except Exception as exc:
             self.web = None
-            self.web_placeholder.setText("Qt WebEngine est indisponible dans ce QGIS.\n\n"
-                "Windows (OSGeo4W) : installer « python3-pyqtwebengine » depuis l'installeur avancé, puis redémarrer QGIS.\n\n"
-                "Détail : {}".format(exc))
-            self.web_info.setText("Le reste de Media Hub (vidéos, radio, notes) continue de fonctionner.")
+            self.web_placeholder.setText(
+                "Navigateur intégré indisponible.\n\n"
+                "L'onglet reste utilisable : les adresses et les raccourcis "
+                "s'ouvrent dans ton navigateur Windows.\n\n"
+                "Pour intégrer Chromium : OSGeo4W Setup → Advanced Install → "
+                "python3-pyqtwebengine → Installer → redémarrer QGIS.\n\n"
+                "Diagnostic : {}".format(exc))
+            self.web_info.setText("Mode navigateur externe (plus rapide pour YouTube). "
+                                  "Impossible d'embarquer Chromium sans PyQtWebEngine.")
 
     @staticmethod
     def _to_web_url(text):
@@ -773,6 +924,8 @@ class MediaHubDock(QDockWidget):
             self.web.setUrl(url)
         else:
             self.address.setText(url.toString())
+            self.prefs.setValue(SETTINGS + "web_last", url.toString())
+            QDesktopServices.openUrl(url)
 
     def _open_address(self):
         self._navigate(self.address.text())
@@ -885,14 +1038,28 @@ class MediaHubDock(QDockWidget):
     # ------ RADIOS ------
     def _create_radio_tab(self):
         page = QWidget()
-        lay = QVBoxLayout(page)
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_scroll = QScrollArea(page)
+        page_scroll.setWidgetResizable(True)
+        page_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        lay = QVBoxLayout(content)
         lay.setContentsMargins(8, 12, 8, 8)
-        lay.setSpacing(11)
+        lay.setSpacing(8)
+        page_scroll.setWidget(content)
+        page_layout.addWidget(page_scroll)
         lay.addWidget(title("Écouter la radio"))
         lay.addWidget(label("Flux directs, sans charger tout le site web.", True))
-        lay.addWidget(label("Stations enregistrées"))
+        lay.addWidget(label("Choisis une station en cliquant sur son image."))
+        # Combo cachée : conserve la logique de sélection des versions précédentes.
         self.station_combo = QComboBox()
-        lay.addWidget(self.station_combo)
+        self.station_combo.hide()
+        self.radio_grid_content = QWidget()
+        self.radio_grid = QGridLayout(self.radio_grid_content)
+        self.radio_grid.setContentsMargins(2, 3, 2, 3)
+        self.radio_grid.setSpacing(8)
+        lay.addWidget(self.radio_grid_content)
         self.use_qgis_network = QCheckBox("Connexion via QGIS (proxy du réseau)")
         self.use_qgis_network.setToolTip(
             "Fait passer l'audio Internet par les paramètres réseau et proxy de QGIS, "
@@ -981,6 +1148,69 @@ class MediaHubDock(QDockWidget):
         idx = self.station_combo.findText(current)
         if idx >= 0:
             self.station_combo.setCurrentIndex(idx)
+        self._render_radio_tiles()
+
+    def _radio_tile_icon(self, name):
+        logo = {
+            "RTL": "rtl.png",
+            "France Inter": "france_inter.png",
+            "FIP": "fip.png",
+            "RMC": "rmc.png",
+        }.get(name)
+        if logo:
+            return QIcon(os.path.join(os.path.dirname(__file__), "radio_icons", logo))
+        # Radios personnalisées : nom directement dans le carré.
+        img = QPixmap(180, 180)
+        img.fill(QColor("#eef2f5"))
+        painter = QPainter(img)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QColor("#34495e"))
+        font = QFont()
+        font.setBold(True)
+        font.setPointSize(10 if len(name) <= 12 else 8)
+        painter.setFont(font)
+        rect = img.rect().adjusted(8, 8, -8, -8)
+        painter.drawText(rect, int(Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap), name)
+        painter.end()
+        return QIcon(img)
+
+    def _render_radio_tiles(self):
+        while self.radio_grid.count():
+            item = self.radio_grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._station_tiles = []
+        for ix, (name, _) in enumerate(self.radio_presets):
+            tile = QToolButton(self.radio_grid_content)
+            tile.setObjectName("mediaHubStationTile")
+            tile.setText(name)
+            tile.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+            tile.setIcon(self._radio_tile_icon(name))
+            tile.setIconSize(QSize(105, 105))
+            tile.setFixedHeight(143)
+            tile.setMinimumWidth(124)
+            tile.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            tile.setCheckable(True)
+            tile.clicked.connect(lambda checked=False, index=ix: self._select_radio_tile(index))
+            tile.setStyleSheet(
+                "QToolButton#mediaHubStationTile { background: white; border: 1px solid #d3dae0; "
+                "border-radius: 5px; padding: 3px; color: #293b49; } "
+                "QToolButton#mediaHubStationTile:hover { background: #f2f7fc; border-color: #9abbd8; } "
+                "QToolButton#mediaHubStationTile:checked { background: #eaf3fc; "
+                "border: 2px solid #3988c9; }"
+            )
+            self.radio_grid.addWidget(tile, ix // 2, ix % 2)
+            self._station_tiles.append(tile)
+        self._highlight_radio_tile(self.station_combo.currentIndex())
+
+    def _highlight_radio_tile(self, active):
+        for index, button in enumerate(self._station_tiles):
+            button.setChecked(index == active)
+
+    def _select_radio_tile(self, ix):
+        self.station_combo.setCurrentIndex(ix)
+        self._highlight_radio_tile(ix)
+        self.start_radio()
 
     def toggle_radio(self):
         # Si la connexion a echoue, relancer tous les flux au lieu de simplement
@@ -1219,6 +1449,7 @@ class MediaHubDock(QDockWidget):
         self._save_stations()
         self._refresh_radios()
         self.station_combo.setCurrentIndex(self.station_combo.findText(name))
+        self._highlight_radio_tile(self.station_combo.currentIndex())
         self.custom_name.clear()
         self.custom_stream.clear()
         self._set_radio_status("Station ajoutée.")
@@ -1281,7 +1512,7 @@ class MediaHubDock(QDockWidget):
             self._initialize_web()
 
     def _settings_dialog(self):
-        message = ("MEDIA HUB 1.3.2 — QGIS 3.44\n"
+        message = ("MEDIA HUB 1.4.0 — QGIS 3.44\n"
                    "Auteur : JulienH77  |  Licence : MIT\n"
                    "Projet : github.com/JulienH77/qgis-media-hub\n\n"
                    "VIDÉO / RADIO\nMoteur : {}\n{}\n\n"

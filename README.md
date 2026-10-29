@@ -55,3 +55,13 @@ Please include: QGIS version, Windows version, VLC 64-bit version, Media Hub ver
 ## Acknowledgements
 
 Designed and maintained by **JulienH77**. The plugin integrates with QGIS and dynamically uses system VLC and optional Qt WebEngine, all provided separately under their respective licenses. This is an independent extension and is not affiliated with or endorsed by QGIS, VLC, YouTube or radio broadcasters.
+
+
+## What's new in 1.4.0
+- Click radio station picture tiles to tune into a station. Personal stations render their names inside their tiles.
+- VLC audio and subtitle streams are selectable from dropdown menus; external SRT/ASS/VTT subtitles can be loaded with the SRT button (once video track information becomes available). Qt Multimedia fallback does not expose these controls.
+- PiP includes volume and smaller skip buttons. Keyboard shortcuts when video/PiP has focus: **Space** play/pause; **Left/Right** -/+ 10 seconds; **Up/Down** volume -/+ 5%; **S** speed 1.0; **Q/D** speed -/+ 0.1.
+- **WebEngine is an optional OSGeo4W package.** On Windows, install `python3-pyqtwebengine` using **OSGeo4W Setup > Advanced Install**, then restart QGIS. Without it, website navigation opens the system browser (YouTube stays functional outside the dock). An embedded fast Chromium browser cannot work without its underlying bindings.
+- Station tiles are illustrative wordmark artwork made specifically for this plugin, not the stations' official brand assets.
+
+Radio streams may be blocked by workplace proxies; this release does not assert that RTL playback is working on every network. Test on your local network before publishing as stable.

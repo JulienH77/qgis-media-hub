@@ -79,6 +79,7 @@ class VLCBackend(QObject):
     mediaStatusChanged = pyqtSignal(int)
     seekableChanged = pyqtSignal(bool)
     error = pyqtSignal(int)
+    tracksChanged = pyqtSignal(object, object, int, int)
 
     # Réutilise les mêmes enums que QMediaPlayer (le panneau est agnostique).
     PlayingState = QMediaPlayer.PlayingState
@@ -108,6 +109,8 @@ class VLCBackend(QObject):
         self._error_message = ""
         self._released = False
         self._video_widget = video_widget
+        self._track_cache = None
+        self._track_poll_count = 0
 
         dll_folder = os.path.dirname(dll_path)
         plugins = os.path.join(dll_folder, "plugins")
@@ -174,6 +177,22 @@ class VLCBackend(QObject):
         bind("libvlc_audio_set_mute", None, P, I)
         bind("libvlc_video_set_mouse_input", None, P, I)
         bind("libvlc_video_set_key_input", None, P, I)
+        # LibVLC 3: identifiants de pistes (ne pas confondre avec les index).
+        for name, result, arguments in (
+            ("libvlc_audio_get_track_description", P, (P,)),
+            ("libvlc_audio_get_track", I, (P,)),
+            ("libvlc_audio_set_track", I, (P, I)),
+            ("libvlc_video_get_spu_description", P, (P,)),
+            ("libvlc_video_get_spu", I, (P,)),
+            ("libvlc_video_set_spu", I, (P, I)),
+            ("libvlc_track_description_list_release", None, (P,)),
+            ("libvlc_media_player_add_slave", I, (P, I, S, I)),
+        ):
+            try:
+                bind(name, result, *arguments)
+            except AttributeError:
+                # Autre version de libVLC: la lecture reste disponible.
+                pass
 
     @staticmethod
     def _ensure_clip_children(hwnd):
@@ -212,6 +231,8 @@ class VLCBackend(QObject):
         self._last_vlc_state = None
         self._last_seekable = False
         self._last_state = QMediaPlayer.StoppedState
+        self._track_cache = None
+        self.tracksChanged.emit([], [], -1, -1)
         self.durationChanged.emit(0)
         self.positionChanged.emit(0)
         self.mediaStatusChanged.emit(QMediaPlayer.LoadingMedia)
@@ -333,10 +354,91 @@ class VLCBackend(QObject):
         if current != self._position:
             self._position = current
             self.positionChanged.emit(current)
+        self._track_poll_count += 1
+        if self._track_poll_count % 5 == 0 and vlc_state in (3, 4):
+            self._refresh_tracks()
         seekable = self.isSeekable()
         if seekable != self._last_seekable:
             self._last_seekable = seekable
             self.seekableChanged.emit(seekable)
+
+    def _describe_tracks(self, function_name):
+        """Lit les listes chaînées libVLC et libère leur mémoire."""
+        fn = getattr(self._dll, function_name, None)
+        release = getattr(self._dll, "libvlc_track_description_list_release", None)
+        if not self._player or fn is None or release is None:
+            return []
+
+        class TrackDescription(ctypes.Structure):
+            pass
+
+        TrackDescription._fields_ = [
+            ("i_id", ctypes.c_int),
+            ("psz_name", ctypes.c_char_p),
+            ("p_next", ctypes.POINTER(TrackDescription)),
+        ]
+        head = fn(self._player)
+        if not head:
+            return []
+        tracks = []
+        try:
+            node = ctypes.cast(head, ctypes.POINTER(TrackDescription))
+            # Limite défensive face à une liste corrompue fournie par la DLL.
+            for _ in range(128):
+                if not node:
+                    break
+                item = node.contents
+                name = (item.psz_name or b"").decode("utf-8", errors="replace")
+                tracks.append((int(item.i_id), name or "Piste {}".format(item.i_id)))
+                node = item.p_next
+        finally:
+            release(ctypes.c_void_p(head))
+        return tracks
+
+    def audio_tracks(self):
+        return self._describe_tracks("libvlc_audio_get_track_description")
+
+    def subtitle_tracks(self):
+        return self._describe_tracks("libvlc_video_get_spu_description")
+
+    def audio_track(self):
+        fn = getattr(self._dll, "libvlc_audio_get_track", None)
+        return int(fn(self._player)) if fn and self._player else -1
+
+    def subtitle_track(self):
+        fn = getattr(self._dll, "libvlc_video_get_spu", None)
+        return int(fn(self._player)) if fn and self._player else -1
+
+    def set_audio_track(self, track_id):
+        fn = getattr(self._dll, "libvlc_audio_set_track", None)
+        return fn(self._player, int(track_id)) == 0 if fn and self._player else False
+
+    def set_subtitle_track(self, track_id):
+        fn = getattr(self._dll, "libvlc_video_set_spu", None)
+        return fn(self._player, int(track_id)) == 0 if fn and self._player else False
+
+    def add_external_subtitle(self, path):
+        """Charge un fichier SRT/ASS/VTT local sur le média VLC actif."""
+        fn = getattr(self._dll, "libvlc_media_player_add_slave", None)
+        if fn is None or not self._player or not os.path.isfile(path):
+            return False
+        from pathlib import Path
+        uri = Path(path).resolve().as_uri().encode("utf-8")
+        ok = fn(self._player, 0, uri, 1) == 0
+        if ok:
+            self._track_cache = None
+            self._refresh_tracks()
+        return ok
+
+    def _refresh_tracks(self):
+        if not self._player:
+            return
+        audio, subtitles = self.audio_tracks(), self.subtitle_tracks()
+        selected_audio, selected_sub = self.audio_track(), self.subtitle_track()
+        snapshot = (tuple(audio), tuple(subtitles), selected_audio, selected_sub)
+        if snapshot != self._track_cache:
+            self._track_cache = snapshot
+            self.tracksChanged.emit(audio, subtitles, selected_audio, selected_sub)
 
     def close(self):
         if self._released:

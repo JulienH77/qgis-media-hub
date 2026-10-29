@@ -2,11 +2,11 @@
 name=Media Hub
 qgisMinimumVersion=3.44
 qgisMaximumVersion=3.44.99
-version=1.3.2
+version=1.4.0
 author=JulienH77
 email=julien.houziaux77183@gmail.com
-description=Play local videos, browse the web, listen to live radio and keep notes in a native-looking QGIS dock panel.
-about=Media Hub is a lightweight dock panel for QGIS 3.44 (Qt5) on Windows. It combines a local video player (pause, 10-second skip, variable speed, picture-in-picture and full screen), an optional Chromium-based web tab with a YouTube shortcut, live Internet radio including RTL, and persistent notes. Developed by JulienH77. VLC Media Player 64-bit is recommended for video and radio; Qt Multimedia is a limited fallback. The web tab requires PyQtWebEngine (Qt5 / OSGeo4W python3-pyqtwebengine) and is not guaranteed to play every website. Radio streams may be blocked by network policies; the optional QGIS network relay supports redirects and proxy settings, but radio playback has not yet been verified on all networks. Experimental release. No bundled VLC binaries, no telemetry. Source code and support: see the public repository.
+description=Watch videos with audio and subtitle tracks, open websites, play live radio from station tiles, and keep notes in a native QGIS panel.
+about=Media Hub is a lightweight dock panel for QGIS 3.44 (Qt5) on Windows. It combines a local video player (pause, 10-second skip, variable speed, picture-in-picture and full screen), an optional Chromium-based web tab with a YouTube shortcut, live Internet radio including RTL, and persistent notes. Developed by JulienH77. VLC Media Player 64-bit is recommended for video and radio; Qt Multimedia is a limited fallback. Embedded web browsing requires optional PyQtWebEngine (Qt5 / OSGeo4W python3-pyqtwebengine); when missing, website shortcuts open in the default external browser. Radio streams may be blocked by network policies; the optional QGIS network relay supports redirects and proxy settings, but radio playback has not yet been verified on all networks. Experimental release. No bundled VLC binaries, no telemetry. Source code and support: see the public repository.
 category=Web
 tags=video,media,radio,web browser,vlc,youtube,notes
 icon=icon.png
@@ -16,7 +16,8 @@ hasProcessingProvider=False
 homepage=https://github.com/JulienH77/qgis-media-hub#readme
 tracker=https://github.com/JulienH77/qgis-media-hub/issues
 repository=https://github.com/JulienH77/qgis-media-hub
-changelog=1.3.2 - Replace subprocess with Qt QProcess for external VLC; use scoped Qt enums for compatibility and remove unused imports.
+changelog=1.4.0 - Radio station image grid and personal station cards; VLC audio/subtitle track selectors and external subtitles; smaller PiP skip buttons, PiP volume, video shortcuts, reliable external-browser fallback when WebEngine is unavailable.
+    1.3.2 - Replace subprocess with Qt QProcess for external VLC; use scoped Qt enums for compatibility and remove unused imports.
     1.3.1 - Publication metadata and English documentation; author credits and PNG icon; no media playback engine changes.
     1.3.0 - Handle HTTP redirects in the optional radio relay.
     1.2.0 - Add QGIS network relay for radio and diagnostics.

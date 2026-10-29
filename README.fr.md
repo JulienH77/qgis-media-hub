@@ -22,3 +22,12 @@ La version 1.3 avait un problème de radio identifié sur un réseau professionn
 Page du projet (après création du dépôt public) : https://github.com/JulienH77/qgis-media-hub
 
 L'extension n'enregistre pas de télémétrie. Préférences, favoris et notes restent locaux. Les marques QGIS, VLC et YouTube appartiennent à leurs propriétaires respectifs.
+
+
+## Nouveautés 1.4.0
+- Grille de radios cliquables (stations personnelles : nom affiché dans le carré).
+- Menus de pistes audio et de sous-titres pour les vidéos lues via VLC.
+- Mini-lecteur PiP : petits boutons ±10 secondes et volume jusqu'à 200 %.
+- Raccourcis vidéo (quand la fenêtre vidéo a le focus) : **Espace** pause/lecture ; **gauche/droite** ±10 secondes ; **haut/bas** volume ±5 % ; **S** vitesse ×1 ; **Q/D** vitesse ∓0,1.
+- Si Qt WebEngine manque, les favoris, raccourcis et URL s'ouvrent directement dans le navigateur système. Pour l'intégration dans QGIS, installer le paquet `python3-pyqtwebengine` avec l'installeur OSGeo4W avancé.
+- Images de stations stylisées créées pour Media Hub (pas les logos officiels).
