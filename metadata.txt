@@ -5,10 +5,11 @@ qgisMaximumVersion=3.44.99
 version=1.4.0
 author=JulienH77
 email=julien.houziaux77183@gmail.com
-description=Watch videos with audio and subtitle tracks, open websites, play live radio from station tiles, and keep notes in a native QGIS panel.
-about=Media Hub is a lightweight dock panel for QGIS 3.44 (Qt5) on Windows. It combines a local video player (pause, 10-second skip, variable speed, picture-in-picture and full screen), an optional Chromium-based web tab with a YouTube shortcut, live Internet radio including RTL, and persistent notes. Developed by JulienH77. VLC Media Player 64-bit is recommended for video and radio; Qt Multimedia is a limited fallback. Embedded web browsing requires optional PyQtWebEngine (Qt5 / OSGeo4W python3-pyqtwebengine); when missing, website shortcuts open in the default external browser. Radio streams may be blocked by network policies; the optional QGIS network relay supports redirects and proxy settings, but radio playback has not yet been verified on all networks. Experimental release. No bundled VLC binaries, no telemetry. Source code and support: see the public repository.
+description=Play local videos with subtitles and PiP, browse websites, listen to 15 French radio stations, and save notes in a QGIS dock panel.
+about=Media Hub 1.4.0 is a light, native-looking multimedia dock for QGIS 3.44 (Qt5) on Windows by JulienH77. Watch video files from a remembered folder or direct URLs using optional system VLC; choose audio and subtitle tracks (including external SRT), adjust playback speed and volume, and use Picture-in-Picture with editable keyboard shortcuts. Browse the Web using optional Qt WebEngine or open sites in the external browser. Listen to 15 preconfigured French radio stations, including RTL, Franceinfo, France Inter, FIP, Europe 1 and NRJ, with compact clickable tiles and the ability to add your own streams. Keep local notes. Requires VLC 64-bit for reliable video/radio; Qt WebEngine may need an OSGeo4W install. Radio availability depends on servers and network restrictions. Experimental; no analytics, no bundled codecs. MIT licensed.
+
 category=Web
-tags=video,media,radio,web browser,vlc,youtube,notes
+tags=video,radio,franceinfo,media,web browser,vlc,youtube,notes,playlist
 icon=icon.png
 experimental=True
 deprecated=False
@@ -16,10 +17,10 @@ hasProcessingProvider=False
 homepage=https://github.com/JulienH77/qgis-media-hub#readme
 tracker=https://github.com/JulienH77/qgis-media-hub/issues
 repository=https://github.com/JulienH77/qgis-media-hub
-changelog=1.4.0 - Radio station image grid and personal station cards; VLC audio/subtitle track selectors and external subtitles; smaller PiP skip buttons, PiP volume, video shortcuts, reliable external-browser fallback when WebEngine is unavailable.
-    1.3.2 - Replace subprocess with Qt QProcess for external VLC; use scoped Qt enums for compatibility and remove unused imports.
-    1.3.1 - Publication metadata and English documentation; author credits and PNG icon; no media playback engine changes.
-    1.3.0 - Handle HTTP redirects in the optional radio relay.
-    1.2.0 - Add QGIS network relay for radio and diagnostics.
-    1.1.0 - Add alternative radio streams and local sound test.
-    1.0.0 - Video, web, radio and notes in one dock panel.
+changelog=1.4.0 - Consolidated feature update since 1.3.2 (QGIS 3.44):
+    RADIO: Add Franceinfo (user-provided high-quality AAC URL), Europe 1, NRJ, Nostalgie, Chérie FM, RTL2, France Culture, France Musique, RFM, Skyrock and Fun Radio, for 15 built-in stations. Add compact, square, clickable radio tiles and text tiles for custom stations. Add alternative streams where available.
+    VIDEO: Add folder-based video library with saved folder, dropdown playback, refresh and automatic folder detection. Add VLC audio/subtitle track selection and external SRT/ASS/VTT subtitles. Improve PiP layout, centered playback controls, legible +/-10 s buttons, independent volume (0 to 200 percent with VLC) and playback-speed control; enlarge primary play/pause button.
+    KEYBOARD: Add Space, arrow keys and Q/S/D video controls; new Settings dialog to customize/reset shortcuts, enable/disable shortcuts and edit preferences. Keys apply within Video or PiP, not globally in QGIS.
+    WEB: Add external-browser fallback when Qt WebEngine is unavailable; retain YouTube and QGIS shortcuts.
+    GENERAL: Refine light QGIS-native panel, preserve persisted notes and settings, update English/French documentation, author attribution and MIT license. Experimental: streaming depends on network and optional components.
+    1.3.2 - Replace subprocess with Qt QProcess; adjust Qt enumerations and plugin metadata.
