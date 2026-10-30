@@ -7,11 +7,13 @@ Le navigateur et les moteurs multimédias sont chargés à la demande : l'absenc
 import json
 import os
 import shutil
+import time
 from pathlib import Path
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import quote_plus, urlparse, urlencode
 
 from qgis.PyQt.QtCore import Qt, QEvent, QProcess, QProcessEnvironment, QSettings, QTimer, QUrl, QSize, QSignalBlocker
 from qgis.PyQt.QtGui import QDesktopServices, QKeySequence, QIcon, QPixmap, QPainter, QColor, QFont
+from qgis.PyQt.QtNetwork import QNetworkRequest, QNetworkReply
 from qgis.PyQt.QtWidgets import (
     QCheckBox, QComboBox, QDockWidget, QDoubleSpinBox, QFileDialog, QFrame,
     QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QShortcut,
@@ -21,6 +23,11 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from .vlc_backend import VLCBackend, QMediaPlayer, find_vlc
+from .i18n import tr_ui, language
+from .ui_localize import apply_localization
+from .radio_catalog import (COUNTRIES, FRANCE_FEATURED, parse_directory_stations,
+                            normalize_saved_stations_v2, stations_for_country,
+                            COUNTRIES_EN, valid_stream_url)
 
 SETTINGS = "qgis_media_hub/"
 # Flux publies par les annuaires de radios (oct. 2026). Des serveurs peuvent
@@ -99,6 +106,7 @@ DEFAULT_VIDEO_SHORTCUTS = {
     "speed_normal": ("Vitesse ×1,0", "S"),
     "speed_down": ("Ralentir de ×0,1", "Q"),
     "speed_up": ("Accélérer de ×0,1", "D"),
+    "toggle_controls": ("Afficher/masquer les commandes du PiP", "H"),
 }
 
 
@@ -162,6 +170,44 @@ def normalize_media(value):
     return "local", path
 
 
+def media_slider_css(dark=False, compact=False):
+    """Flat VLC-inspired track: the filled section reflects the current value."""
+    groove = "#4c5663" if dark else "#dce3e9"
+    active = "#68a5d8" if dark else "#287fbd"
+    handle = "#eaf3fc" if dark else "#ffffff"
+    diameter = 10 if compact else 12
+    return (
+        "QSlider::groove:horizontal {{ height: 4px; border-radius: 2px; "
+        "background: {}; }} "
+        "QSlider::sub-page:horizontal {{ background: {}; border-radius: 2px; }} "
+        "QSlider::handle:horizontal {{ width: {}px; height: {}px; "
+        "margin: -{}px 0; border-radius: {}px; border: 1px solid {}; "
+        "background: {}; }}".format(
+            groove, active, diameter, diameter,
+            (diameter - 4) // 2, diameter // 2, active, handle))
+
+
+def media_speed_css(dark=False):
+    """Shared style for the QGIS dock and the PiP/fullscreen speed field."""
+    return (
+        "QDoubleSpinBox {{ background: {}; color: {}; border: 1px solid {}; "
+        "border-radius: 5px; padding: 3px 7px; font-weight: 600; }}".format(
+            "#2c3239" if dark else "#f5f8fa",
+            "#f1f4f6" if dark else "#283642",
+            "#566472" if dark else "#d1dce5"))
+
+
+def configure_speed_spinbox(spinbox):
+    """Exactly the same speed behaviour in the dock, PiP and fullscreen."""
+    spinbox.setRange(0.1, 5.0)
+    spinbox.setDecimals(1)
+    spinbox.setSingleStep(0.1)
+    spinbox.setSuffix("×")
+    spinbox.setFixedWidth(72)
+    spinbox.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.NoButtons)
+    spinbox.setToolTip("Vitesse de lecture, modifiable par pas de 0,1")
+
+
 class FloatPlayer(QWidget):
     """PiP léger qui accueille la *même* surface vidéo, sans second lecteur."""
 
@@ -169,28 +215,53 @@ class FloatPlayer(QWidget):
         super().__init__(None, Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint)
         self.dock = dock
         self.setWindowTitle("Media Hub — Vidéo flottante")
-        self.setMinimumSize(350, 220)
+        self.setMinimumSize(375, 200)
         self.resize(520, 345)
-        # Avoid a parent stylesheet: it propagates to QPushButton children on
-        # Windows and can make the skip buttons appear as black rectangles.
+        self.setObjectName("mediaHubFloatPlayer")
         self.setAutoFillBackground(True)
-        palette = self.palette()
-        palette.setColor(self.backgroundRole(), QColor("#f8f9fb"))
-        self.setPalette(palette)
+        self._controls_hidden = False
+        self._dark_mode = False
         base = QVBoxLayout(self)
-        base.setContentsMargins(5, 5, 5, 5)
-        base.setSpacing(5)
+        base.setContentsMargins(4, 3, 4, 3)
+        base.setSpacing(2)
         self.canvas_layout = QVBoxLayout()
         self.canvas_layout.setContentsMargins(0, 0, 0, 0)
         base.addLayout(self.canvas_layout, 1)
+        # Playback timeline shared with the dock's media player. A second Qt
+        # slider is intentional: VLC continues to own ONE media instance.
+        self._seek_pressed = False
+        self.seek_container = QWidget(self)
+        timeline = QHBoxLayout(self.seek_container)
+        timeline.setContentsMargins(3, 0, 3, 0)
+        timeline.setSpacing(5)
+        self.elapsed_label = QLabel(time_label(dock.player.position()) if dock.player else "00:00")
+        self.elapsed_label.setFixedWidth(43)
+        self.elapsed_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.seek_slider = QSlider(Qt.Orientation.Horizontal)
+        self.seek_slider.setRange(0, max(0, dock.current_duration))
+        self.seek_slider.setValue(min(max(0, dock.player.position()),
+                                      dock.current_duration) if dock.player else 0)
+        self.seek_slider.setEnabled(dock.current_duration > 0)
+        self.seek_slider.setToolTip("Position de lecture (déplacer pour avancer ou reculer)")
+        self.seek_slider.sliderPressed.connect(self._begin_seek)
+        self.seek_slider.sliderReleased.connect(self._finish_seek)
+        self.seek_slider.valueChanged.connect(self._preview_seek)
+        timeline.addWidget(self.elapsed_label)
+        timeline.addWidget(self.seek_slider, 1)
+        self.total_label = QLabel(time_label(dock.current_duration))
+        self.total_label.setFixedWidth(43)
+        self.total_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        timeline.addWidget(self.total_label)
+        self.seek_container.setMaximumHeight(23)
+        base.addWidget(self.seek_container)
         # Commandes PiP : zones latérales de largeur identique. Le groupe
         # -10 / Lecture / +10 reste ainsi au centre GEOMETRIQUE de la fenêtre,
         # même quand celle-ci est redimensionnée.
         navigation = QGridLayout()
         navigation.setContentsMargins(0, 0, 0, 0)
         navigation.setHorizontalSpacing(0)
-        navigation.setColumnMinimumWidth(0, 82)
-        navigation.setColumnMinimumWidth(2, 82)
+        navigation.setColumnMinimumWidth(0, 76)
+        navigation.setColumnMinimumWidth(2, 76)
         # The two side columns grow equally: the playback cluster stays in
         # the exact geometric center even if the PiP window is resized.
         navigation.setColumnStretch(0, 1)
@@ -199,7 +270,7 @@ class FloatPlayer(QWidget):
 
         self.close_button = make_button("↩ QGIS", self.return_to_dock,
                                         "Replacer la vidéo dans QGIS")
-        self.close_button.setFixedSize(76, 32)
+        self.close_button.setFixedSize(76, 26)
         self.close_button.setStyleSheet(self._secondary_button_style())
         navigation.addWidget(self.close_button, 0, 0, Qt.AlignmentFlag.AlignLeft)
 
@@ -209,12 +280,12 @@ class FloatPlayer(QWidget):
         centered_row.setSpacing(4)
         back = make_button("−10 s", lambda: dock.skip(-10000),
                            "Reculer de 10 secondes")
-        back.setFixedSize(47, 32)
+        back.setFixedSize(47, 26)
         back.setStyleSheet(self._secondary_button_style())
         centered_row.addWidget(back)
         self.play_button = make_button("Pause", dock.toggle_play,
                                        "Lecture / Pause (Espace)")
-        self.play_button.setFixedSize(78, 32)
+        self.play_button.setFixedSize(78, 26)
         self.play_button.setStyleSheet(
             "QPushButton { font-weight: 600; color: #223e57; background-color: #e8f1f9; "
             "border: 1px solid #a4c3df; border-radius: 5px; } "
@@ -223,51 +294,78 @@ class FloatPlayer(QWidget):
         centered_row.addWidget(self.play_button)
         forward = make_button("+10 s", lambda: dock.skip(10000),
                               "Avancer de 10 secondes")
-        forward.setFixedSize(47, 32)
+        forward.setFixedSize(47, 26)
         forward.setStyleSheet(self._secondary_button_style())
         centered_row.addWidget(forward)
         navigation.addWidget(center_controls, 0, 1, Qt.AlignmentFlag.AlignHCenter)
 
         self.fullscreen_button = make_button("⛶", self.toggle_fullscreen,
                                              "Plein écran / retour")
-        self.fullscreen_button.setFixedSize(36, 32)
+        self.fullscreen_button.setFixedSize(36, 26)
         self.fullscreen_button.setStyleSheet(self._secondary_button_style())
         navigation.addWidget(self.fullscreen_button, 0, 2,
                              Qt.AlignmentFlag.AlignRight)
-        base.addLayout(navigation)
+        self.navigation_container = QWidget(self)
+        self.navigation_container.setLayout(navigation)
+        self.navigation_container.setMaximumHeight(28)
+        base.addWidget(self.navigation_container)
 
-        # Les contrôles secondaires restent sur une ligne distincte : la
-        # vitesse et le volume ne décentrent plus les commandes principales.
-        sound = QHBoxLayout()
-        sound.setSpacing(5)
-        sound.addWidget(QLabel("Son"))
+        # Secondary actions share ONE compact row. Unlike the old 3-row
+        # toolbar, PiP and fullscreen reserve much more height for the film.
+        # When playback controls are collapsed, only the theme and show
+        # buttons remain visible, so the user is never locked out.
+        secondary = QHBoxLayout()
+        secondary.setContentsMargins(0, 0, 0, 0)
+        secondary.setSpacing(3)
+        self.sound_controls = QWidget(self)
+        sound = QHBoxLayout(self.sound_controls)
+        sound.setContentsMargins(0, 0, 0, 0)
+        sound.setSpacing(3)
+        self.sound_icon = make_button("🔊", dock._toggle_mute,
+                                      "Couper ou rétablir le son")
+        self.sound_icon.setFixedSize(26, 22)
+        sound.addWidget(self.sound_icon)
+        if dock.player and dock.player.isMuted():
+            self.sound_icon.setText("🔇")
         self.volume = QSlider(Qt.Orientation.Horizontal)
-        self.volume.setRange(0, 200)
-        self.volume.setMinimumWidth(40)
+        self.volume.setRange(0, dock.volume_slider.maximum())
+        self.volume.setFixedWidth(70)
         self.volume.setValue(dock.volume_slider.value())
         self.volume.setToolTip("Volume 0–200 % (moteur VLC)")
         self.volume.valueChanged.connect(dock.volume_slider.setValue)
         dock.volume_slider.valueChanged.connect(self.volume.setValue)
-        sound.addWidget(self.volume, 1)
-        self.volume_value = QLabel("{} %".format(self.volume.value()))
-        self.volume_value.setFixedWidth(48)
+        sound.addWidget(self.volume)
+        self.volume_value = QLabel("{}%".format(self.volume.value()))
+        self.volume_value.setFixedWidth(34)
+        self.volume_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.volume.valueChanged.connect(
-            lambda value: self.volume_value.setText("{} %".format(value)))
+            lambda value: self.volume_value.setText("{}%".format(value)))
         sound.addWidget(self.volume_value)
-        sound.addSpacing(7)
-        speed_label = QLabel("Vitesse")
-        sound.addWidget(speed_label)
-        self.speed_box = QDoubleSpinBox()
-        self.speed_box.setRange(0.1, 5.0)
-        self.speed_box.setSingleStep(0.1)
-        self.speed_box.setDecimals(1)
-        self.speed_box.setSuffix("×")
+        # PiP and fullscreen use the SAME QDoubleSpinBox as the main QGIS
+        # video panel, instead of an ordered dropdown list. Both directions
+        # are connected to the existing dock speed field / VLC playback rate.
+        self.speed_box = QDoubleSpinBox(self)
+        self.speed_box.setAccessibleName("Vitesse de lecture")
+        configure_speed_spinbox(self.speed_box)
+        self.speed_box.setFixedHeight(23)
         self.speed_box.setValue(dock.speed.value())
-        self.speed_box.setFixedSize(66, 30)
         self.speed_box.valueChanged.connect(dock.speed.setValue)
         dock.speed.valueChanged.connect(self.speed_box.setValue)
         sound.addWidget(self.speed_box)
-        base.addLayout(sound)
+        secondary.addWidget(self.sound_controls)
+        secondary.addStretch(1)
+        self.theme_button = make_button("☾ Sombre", dock.toggle_dark_mode,
+                                        "Basculer entre le thème clair et le thème sombre")
+        self.theme_button.setFixedSize(68, 22)
+        secondary.addWidget(self.theme_button)
+        self.controls_button = make_button("⌄ Masquer", self.toggle_controls,
+                                          "Masquer/afficher les commandes (H)")
+        self.controls_button.setFixedSize(76, 22)
+        secondary.addWidget(self.controls_button)
+        self.sound_container = QWidget(self)
+        self.sound_container.setLayout(secondary)
+        self.sound_container.setMaximumHeight(26)
+        base.addWidget(self.sound_container)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._shortcuts = []
         dock._register_video_shortcuts(self, self._shortcuts)
@@ -275,6 +373,93 @@ class FloatPlayer(QWidget):
         self._esc.activated.connect(self._on_escape)
         self._returning = False
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.apply_theme(dock._dark_mode)
+        apply_localization(self)
+        self.set_controls_hidden(str(dock.prefs.value(
+            SETTINGS + "pip_controls_hidden", "false")).lower() in ("true", "1"))
+
+    def _begin_seek(self):
+        self._seek_pressed = True
+
+    def _preview_seek(self, value):
+        if self._seek_pressed:
+            self.elapsed_label.setText(time_label(value))
+
+    def _finish_seek(self):
+        self._seek_pressed = False
+        if (self.dock.player and self.dock.current_kind == "video"
+                and self.dock.player.isSeekable()):
+            self.dock.player.setPosition(self.seek_slider.value())
+        elif self.dock.player:
+            self.update_position(self.dock.player.position())
+
+    def update_position(self, milliseconds):
+        if not self._seek_pressed:
+            self.seek_slider.setValue(max(0, min(self.seek_slider.maximum(), int(milliseconds))))
+            self.elapsed_label.setText(time_label(milliseconds))
+
+    def update_duration(self, milliseconds):
+        duration = max(0, int(milliseconds))
+        self.seek_slider.setRange(0, duration)
+        self.seek_slider.setEnabled(duration > 0)
+        self.total_label.setText(time_label(duration))
+
+    def apply_theme(self, dark):
+        """Theme only this floating window; QGIS' global appearance is untouched."""
+        self._dark_mode = bool(dark)
+        palette = self.palette()
+        palette.setColor(self.backgroundRole(), QColor("#181b20" if dark else "#f8f9fb"))
+        palette.setColor(palette.WindowText, QColor("#f2f4f7" if dark else "#26323d"))
+        self.setPalette(palette)
+        bg = "#242a32" if dark else "#f3f5f7"
+        fg = "#f2f4f7" if dark else "#273742"
+        edge = "#515b67" if dark else "#bfcbd3"
+        over = "#35404a" if dark else "#e3edf5"
+        button_css = (
+            "QPushButton {{ color: {}; background-color: {}; border: 1px solid {}; "
+            "border-radius: 4px; font-weight: 500; }} "
+            "QPushButton:hover {{ background-color: {}; }}".format(fg, bg, edge, over))
+        for widget in (self.close_button, self.fullscreen_button,
+                       self.theme_button, self.controls_button):
+            widget.setStyleSheet(button_css)
+        for item in self.navigation_container.findChildren(QPushButton):
+            if item is not self.play_button:
+                item.setStyleSheet(button_css)
+        self.play_button.setStyleSheet(
+            "QPushButton {{ color: {}; background: {}; border: 1px solid {}; "
+            "border-radius: 5px; font-weight: 600; }}".format(
+                "#ffffff" if dark else "#223e57",
+                "#31577b" if dark else "#e8f1f9",
+                "#6f99bd" if dark else "#a4c3df"))
+        self.setStyleSheet(
+            "QWidget#mediaHubFloatPlayer {{ background: {}; color: {}; }} "
+            "QLabel {{ color: {}; background: transparent; }} "
+            "QDoubleSpinBox {{ color: {}; background: {}; border: 1px solid {}; }}".format(
+                "#181b20" if dark else "#f8f9fb", fg, fg, fg, bg, edge))
+        self.seek_slider.setStyleSheet(media_slider_css(dark))
+        self.volume.setStyleSheet(media_slider_css(dark, compact=True))
+        self.speed_box.setStyleSheet(media_speed_css(dark))
+        self.sound_icon.setStyleSheet(button_css)
+        # Keep explicit per-button CSS: on some Windows Qt styles it prevents
+        # the +/-10-second buttons from appearing as black empty rectangles.
+        theme_label = "☀ Clair" if dark else "☾ Sombre"
+        self.theme_button.setProperty("mediahub_original_label", theme_label)
+        self.theme_button.setText(tr_ui(theme_label))
+
+    def set_controls_hidden(self, hidden):
+        self._controls_hidden = bool(hidden)
+        self.navigation_container.setVisible(not hidden)
+        self.seek_container.setVisible(not hidden)
+        self.sound_controls.setVisible(not hidden)
+        toggle_label = "⌃ Afficher" if hidden else "⌄ Masquer"
+        self.controls_button.setProperty("mediahub_original_label", toggle_label)
+        self.controls_button.setText(tr_ui(toggle_label))
+        self.controls_button.setToolTip("Afficher les commandes (H)" if hidden
+                                        else "Masquer les commandes (H)")
+        self.dock.prefs.setValue(SETTINGS + "pip_controls_hidden", hidden)
+
+    def toggle_controls(self):
+        self.set_controls_hidden(not self._controls_hidden)
 
     @staticmethod
     def _secondary_button_style():
@@ -332,7 +517,12 @@ class MediaHubDock(QDockWidget):
         self._load_id = 0
         self._moving = False
         self._popup = None
+        self._dark_mode = str(self.prefs.value(SETTINGS + "dark_mode", "false")).lower() in ("true", "1")
         self._seek_pressed = False
+        self._directory_reply = None
+        self._country_catalogs = {}
+        self._country_homepages = {}
+        self.user_radios = []
         self._radio_session = 0
         self._radio_sources = []
         self._radio_attempt_index = -1
@@ -358,6 +548,8 @@ class MediaHubDock(QDockWidget):
 
         body = QWidget(self)
         self.setWidget(body)
+        body.setObjectName("mediaHubBody")
+        self._body = body
         outer = QVBoxLayout(body)
         outer.setContentsMargins(8, 9, 8, 7)
         outer.setSpacing(6)
@@ -368,6 +560,10 @@ class MediaHubDock(QDockWidget):
         author_tag.setStyleSheet("color: #7b858c; font-size: 10px;")
         head.addWidget(author_tag)
         head.addStretch(1)
+        self.theme_btn = QToolButton()
+        self.theme_btn.setToolTip("Mode sombre : thème sombre / clair de Media Hub")
+        self.theme_btn.clicked.connect(self.toggle_dark_mode)
+        head.addWidget(self.theme_btn)
         self.settings_btn = QToolButton()
         self.settings_btn.setText("⚙")
         self.settings_btn.setToolTip("Paramètres et diagnostics")
@@ -397,6 +593,8 @@ class MediaHubDock(QDockWidget):
         self._initialize_player()
         self._restore_video_folder()
         self._load_radio_presets()
+        self._apply_theme()
+        self._apply_language()
         app = QApplication.instance()
         if app is not None:
             app.installEventFilter(self)
@@ -405,6 +603,99 @@ class MediaHubDock(QDockWidget):
         self.tabs.setCurrentIndex(max(0, min(3, saved_tab)))
         if self.tabs.currentIndex() == 1:
             self._initialize_web()
+
+    def toggle_dark_mode(self):
+        self._dark_mode = not self._dark_mode
+        self.prefs.setValue(SETTINGS + "dark_mode", self._dark_mode)
+        self._apply_theme()
+
+    def _apply_theme(self):
+        """Light by default; dark mode remains scoped to Media Hub widgets."""
+        dark = self._dark_mode
+        self.theme_btn.setText("☀" if dark else "☾")
+        self.theme_btn.setToolTip(tr_ui("Revenir au thème clair" if dark else "Activer le mode sombre"))
+        if dark:
+            self._body.setStyleSheet("""
+                QWidget#mediaHubBody, QTabWidget::pane, QScrollArea,
+                QScrollArea > QWidget, QWidget#radioContent {
+                    background: #20242a; color: #edf0f3; }
+                QLabel { color: #e4e8ed; }
+                QTabBar::tab { background: #2c323a; color: #e9edf1;
+                    padding: 6px 10px; border: 1px solid #525b67; }
+                QTabBar::tab:selected { background: #3c4651; }
+                QLineEdit, QComboBox, QTextEdit, QDoubleSpinBox, QKeySequenceEdit {
+                    color: #f1f3f6; background: #2c3239;
+                    border: 1px solid #65707c; border-radius: 3px; }
+                QPushButton, QToolButton { color: #f1f4f6; background: #343d47;
+                    border: 1px solid #56616e; padding: 4px; border-radius: 4px; }
+                QPushButton:hover, QToolButton:hover { background: #45515f; }
+                QCheckBox { color: #eef1f5; }
+            """)
+            self.video_placeholder.setStyleSheet(
+                "background: #14171c; color: #d1d8df; border: 1px solid #414a54;")
+            self.play_video_btn.setStyleSheet(
+                "QPushButton { background: #31577b; color: white; font-weight: 600; "
+                "border: 1px solid #7199bd; border-radius: 5px; }")
+        else:
+            self._body.setStyleSheet("")
+            self.video_placeholder.setStyleSheet(
+                "background: #eef1f4; color: #74818d; border: 1px solid #dce2e6;")
+            self.play_video_btn.setStyleSheet(
+                "QPushButton { font-weight: 600; background: #e8f1f9; "
+                "border: 1px solid #a4c3df; border-radius: 5px; } "
+                "QPushButton:hover { background: #d9eafb; }")
+        for item in self._body.findChildren(QLabel):
+            style = item.styleSheet()
+            if "font-weight: 600; color: #35434e" in style or "font-weight: 600; color: #e4e8ed" in style:
+                item.setStyleSheet("font-size: 14px; font-weight: 600; color: {};".format(
+                    "#e4e8ed" if dark else "#35434e"))
+            elif style in ("color: #6e7983; font-size: 11px;",
+                           "color: #a8b5c2; font-size: 11px;"):
+                item.setStyleSheet("color: {}; font-size: 11px;".format(
+                    "#a8b5c2" if dark else "#6e7983"))
+        self._style_radio_tiles()
+        self._style_web_controls()
+        self.seek.setStyleSheet(media_slider_css(dark))
+        self.volume_slider.setStyleSheet(media_slider_css(dark))
+        self.speed.setStyleSheet(media_speed_css(dark))
+        if self._popup is not None:
+            self._popup.apply_theme(dark)
+
+    def _apply_language(self):
+        """UI-only translations; never alter station names, streams or notes."""
+        apply_localization(self._body)
+        self._refresh_country_labels()
+        if self._popup is not None:
+            apply_localization(self._popup)
+        self._style_radio_tiles()
+
+    def _refresh_country_labels(self):
+        selected = self.radio_country_combo.currentData()
+        for combo in (self.radio_country_combo, self.custom_country):
+            for index, (code, display) in enumerate(COUNTRIES):
+                combo.setItemText(index,
+                    COUNTRIES_EN.get(code, display) if language() == "en" else display)
+        index = self.radio_country_combo.findData(selected)
+        if index >= 0:
+            blocker = QSignalBlocker(self.radio_country_combo)
+            self.radio_country_combo.setCurrentIndex(index)
+            del blocker
+
+    def _style_radio_tiles(self):
+        dark = self._dark_mode
+        for tile in self._station_tiles:
+            tile.setStyleSheet(
+                "QToolButton#mediaHubStationTile {{ background: {}; border: 1px solid {}; "
+                "border-radius: 5px; padding: 2px; }} "
+                "QToolButton#mediaHubStationTile:hover {{ border-color: #89b4db; }} "
+                "QToolButton#mediaHubStationTile:checked {{ border: 2px solid #3988c9; }}".format(
+                    "#343b44" if dark else "#ffffff",
+                    "#67727e" if dark else "#d8dfe5"))
+        for cell in getattr(self, "_radio_cells", []):
+            for caption in cell.findChildren(QLabel, "mediaHubStationCaption"):
+                caption.setStyleSheet("color: {}; font-size: 11px; font-weight: 500; "
+                                      "background: transparent;".format(
+                                          "#e6ebef" if dark else "#334352"))
 
     # ------ VIDÉOS ------
     def _create_video_tab(self):
@@ -512,11 +803,7 @@ class MediaHubDock(QDockWidget):
         controls.addStretch(1)
         controls.addWidget(label("Vitesse"))
         self.speed = QDoubleSpinBox()
-        self.speed.setRange(0.1, 5.0)
-        self.speed.setDecimals(1)
-        self.speed.setSingleStep(0.1)
-        self.speed.setSuffix("×")
-        self.speed.setFixedWidth(72)
+        configure_speed_spinbox(self.speed)
         self.speed.setValue(float(self.prefs.value(SETTINGS + "speed", 1.0) or 1.0))
         self.speed.valueChanged.connect(self._set_speed)
         controls.addWidget(self.speed)
@@ -644,6 +931,7 @@ class MediaHubDock(QDockWidget):
             "speed_normal": lambda: self.speed.setValue(1.0),
             "speed_down": lambda: self._speed_step(-0.1),
             "speed_up": lambda: self._speed_step(0.1),
+            "toggle_controls": lambda: self._popup.toggle_controls() if self._popup else None,
         }
 
     def _register_video_shortcuts(self, target, keep):
@@ -1007,14 +1295,14 @@ class MediaHubDock(QDockWidget):
         self.video_placeholder.show()
 
     def _set_video_status(self, text, error=False):
-        self.video_status.setText(text)
+        self.video_status.setText(tr_ui(text))
         self.video_status.setStyleSheet("color: #ad3838;" if error else "color: #71808a; font-size: 11px;")
-        self.video_status.setToolTip(text)
+        self.video_status.setToolTip(tr_ui(text))
 
     def _set_radio_status(self, text, error=False):
-        self.radio_status.setText(text)
+        self.radio_status.setText(tr_ui(text))
         self.radio_status.setStyleSheet("color: #ad3838;" if error else "color: #71808a; font-size: 11px;")
-        self.radio_status.setToolTip(text)
+        self.radio_status.setToolTip(tr_ui(text))
 
     def toggle_play(self):
         if not self.player:
@@ -1046,6 +1334,8 @@ class MediaHubDock(QDockWidget):
         if self.current_kind != "video":
             return
         self.elapsed.setText(time_label(ms))
+        if self._popup:
+            self._popup.update_position(ms)
         if not self._seek_pressed:
             self.seek.setValue(max(0, min(self.seek.maximum(), int(ms))))
 
@@ -1053,16 +1343,18 @@ class MediaHubDock(QDockWidget):
         if self.current_kind != "video":
             return
         self.current_duration = max(0, int(ms))
+        if self._popup:
+            self._popup.update_duration(self.current_duration)
         self.seek.setRange(0, self.current_duration)
         self.total.setText(time_label(self.current_duration))
 
     def _state_changed(self, state):
         if state == QMediaPlayer.PlayingState:
             self.loaded = True
-        self.play_video_btn.setText("⏸ Pause" if state == QMediaPlayer.PlayingState else "▶ Lecture")
-        self.radio_play_btn.setText("⏸ Pause" if state == QMediaPlayer.PlayingState and self.current_kind == "radio" else "▶ Reprendre")
+        self.play_video_btn.setText(tr_ui("⏸ Pause" if state == QMediaPlayer.PlayingState else "▶ Lecture"))
+        self.radio_play_btn.setText(tr_ui("⏸ Pause" if state == QMediaPlayer.PlayingState and self.current_kind == "radio" else "▶ Reprendre"))
         if self._popup:
-            self._popup.play_button.setText("Pause" if state == QMediaPlayer.PlayingState else "Lecture")
+            self._popup.play_button.setText(tr_ui("Pause" if state == QMediaPlayer.PlayingState else "Lecture"))
         if self.current_kind == "radio" and state == QMediaPlayer.PlayingState:
             self._radio_retry_pending = False
             self.radio_play_btn.setText("⏸ Pause")
@@ -1098,6 +1390,8 @@ class MediaHubDock(QDockWidget):
             now = not self.player.isMuted()
             self.player.setMuted(now)
             self.mute_btn.setText("Activer son" if now else "Muet")
+            if self._popup:
+                self._popup.sound_icon.setText("🔇" if now else "🔊")
 
     def _transition_canvas(self, target_layout, new_parent):
         if not self.player:
@@ -1180,51 +1474,162 @@ class MediaHubDock(QDockWidget):
 
     # ------ WEB ------
     def _create_browser_tab(self):
+        """Minimal, adaptive web toolbar using Qt-native controls."""
         self.browser_page = QWidget()
+        self.browser_page.setObjectName("mediaHubWebPage")
         lay = QVBoxLayout(self.browser_page)
-        lay.setContentsMargins(5, 10, 5, 7)
-        lay.setSpacing(7)
-        actions = QHBoxLayout()
+        lay.setContentsMargins(7, 9, 7, 7)
+        lay.setSpacing(8)
+
+        heading = QHBoxLayout()
+        heading.setSpacing(6)
+        heading.addWidget(title("Navigateur"))
+        heading.addStretch(1)
+        self.web_mode_badge = QLabel("WEB")
+        self.web_mode_badge.setObjectName("webModeBadge")
+        heading.addWidget(self.web_mode_badge)
+        lay.addLayout(heading)
+
+        self.web_toolbar = QFrame(self.browser_page)
+        self.web_toolbar.setObjectName("mediaHubWebToolbar")
+        actions = QHBoxLayout(self.web_toolbar)
+        actions.setContentsMargins(5, 5, 5, 5)
+        actions.setSpacing(4)
         self.back_btn = make_button("‹", self._web_back, "Page précédente")
-        actions.addWidget(self.back_btn)
         self.next_btn = make_button("›", self._web_forward, "Page suivante")
-        actions.addWidget(self.next_btn)
-        actions.addWidget(make_button("⟳", self._web_reload, "Actualiser"))
+        self.reload_btn = make_button("↻", self._web_reload, "Actualiser")
+        for btn in (self.back_btn, self.next_btn, self.reload_btn):
+            btn.setObjectName("mediaHubWebNav")
+            btn.setFixedSize(27, 28)
+            actions.addWidget(btn)
         self.address = QLineEdit()
-        self.address.setPlaceholderText("Adresse Internet ou recherche…")
+        self.address.setObjectName("mediaHubAddress")
+        self.address.setMinimumWidth(70)
+        self.address.setPlaceholderText("Rechercher ou saisir une adresse…")
+        self.address.setClearButtonEnabled(True)
         self.address.returnPressed.connect(self._open_address)
         actions.addWidget(self.address, 1)
-        actions.addWidget(make_button("Aller", self._open_address))
-        lay.addLayout(actions)
+        self.go_btn = make_button("→", self._open_address, "Ouvrir l'adresse")
+        self.go_btn.setObjectName("mediaHubWebGo")
+        self.go_btn.setFixedSize(29, 28)
+        actions.addWidget(self.go_btn)
+        lay.addWidget(self.web_toolbar)
+
         shortcuts = QHBoxLayout()
-        shortcuts.addWidget(make_button("▶ YouTube", lambda: self._navigate("https://www.youtube.com/")))
-        shortcuts.addWidget(make_button("Recherche", lambda: self._navigate("https://www.google.com/")))
-        shortcuts.addWidget(make_button("QGIS", lambda: self._navigate("https://docs.qgis.org/3.44/fr/docs/")))
+        shortcuts.setSpacing(5)
+        self.web_quicklinks = []
+        for text, target in (
+                ("▶ YouTube", "https://www.youtube.com/"),
+                ("⌕ Recherche", "https://www.google.com/"),
+                ("QGIS", "https://docs.qgis.org/3.44/fr/docs/")):
+            btn = make_button(text, lambda checked=False, url=target: self._navigate(url))
+            btn.setObjectName("mediaHubWebQuicklink")
+            btn.setFixedHeight(28)
+            shortcuts.addWidget(btn)
+            self.web_quicklinks.append(btn)
         shortcuts.addStretch(1)
-        shortcuts.addWidget(make_button("↗", self._web_external, "Ouvrir cette page dans le navigateur normal"))
+        self.web_open_external = make_button("↗", self._web_external,
+                                              "Ouvrir cette page dans le navigateur normal")
+        self.web_open_external.setObjectName("mediaHubWebNav")
+        self.web_open_external.setFixedSize(29, 28)
+        shortcuts.addWidget(self.web_open_external)
         lay.addLayout(shortcuts)
-        favorites_row = QHBoxLayout()
+
+        self.web_bookmarks = QFrame(self.browser_page)
+        self.web_bookmarks.setObjectName("mediaHubBookmarks")
+        favorites_row = QHBoxLayout(self.web_bookmarks)
+        favorites_row.setContentsMargins(7, 5, 7, 5)
+        favorites_row.setSpacing(5)
         favorites_row.addWidget(label("Favoris", True))
         self.favorites_combo = QComboBox()
-        self.favorites_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.favorites_combo.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                           QSizePolicy.Policy.Fixed)
         favorites_row.addWidget(self.favorites_combo, 1)
-        favorites_row.addWidget(make_button("Aller", self._favorite_go))
-        favorites_row.addWidget(make_button("+", self._favorite_add, "Enregistrer l'adresse actuelle"))
-        favorites_row.addWidget(make_button("−", self._favorite_remove, "Supprimer ce favori"))
-        lay.addLayout(favorites_row)
+        for caption, callback, tip in (
+                ("↗", self._favorite_go, "Ouvrir le favori"),
+                ("+", self._favorite_add, "Enregistrer l'adresse actuelle"),
+                ("−", self._favorite_remove, "Supprimer ce favori")):
+            btn = make_button(caption, callback, tip)
+            btn.setObjectName("mediaHubWebNav")
+            btn.setFixedSize(26, 26)
+            favorites_row.addWidget(btn)
+        lay.addWidget(self.web_bookmarks)
         self._load_favorites()
+
         self.web_container = QVBoxLayout()
         self.web_container.setContentsMargins(0, 0, 0, 0)
         lay.addLayout(self.web_container, 1)
-        self.web_placeholder = label("Le navigateur Chromium s'initialisera à l'ouverture de cet onglet.", True)
+        self.web_empty_card = QFrame(self.browser_page)
+        self.web_empty_card.setObjectName("mediaHubWebEmpty")
+        empty = QVBoxLayout(self.web_empty_card)
+        empty.setContentsMargins(18, 20, 18, 20)
+        empty.setSpacing(8)
+        empty.addStretch(1)
+        icon = QLabel("◎")
+        icon.setObjectName("mediaHubWebEmptyIcon")
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty.addWidget(icon)
+        self.web_placeholder = label(
+            "Choisis un raccourci ou saisis une adresse pour commencer.", True)
         self.web_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.web_container.addWidget(self.web_placeholder)
-        self.web_fallback = make_button("Ouvrir le site dans mon navigateur ↗", self._web_external,
+        self.web_placeholder.setWordWrap(True)
+        empty.addWidget(self.web_placeholder)
+        self.web_fallback = make_button("Ouvrir dans mon navigateur ↗",
+                                        self._web_external,
                                         "Fonctionne même si Chromium n'est pas disponible dans QGIS")
-        lay.addWidget(self.web_fallback)
-        self.web_info = label("Qt WebEngine : un navigateur intégré ne sera pas forcément aussi rapide que Firefox.", True)
+        self.web_fallback.setObjectName("mediaHubWebFallback")
+        self.web_fallback.setMinimumHeight(32)
+        empty.addWidget(self.web_fallback, 0, Qt.AlignmentFlag.AlignHCenter)
+        empty.addStretch(1)
+        self.web_container.addWidget(self.web_empty_card)
+        self.web_info = label("Navigateur intégré si Qt WebEngine est disponible.", True)
+        self.web_info.setWordWrap(True)
         lay.addWidget(self.web_info)
         self.tabs.addTab(self.browser_page, "Web")
+
+    def _style_web_controls(self):
+        """Theme-aware, restrained design; no global QGIS stylesheet changes."""
+        if not hasattr(self, "web_toolbar"):
+            return
+        dark = self._dark_mode
+        fg = "#e7edf2" if dark else "#314454"
+        bg = "#292f37" if dark else "#f7f9fa"
+        panel = "#242a31" if dark else "#ffffff"
+        edge = "#586472" if dark else "#dce5eb"
+        hover = "#374553" if dark else "#e8f2f9"
+        self.web_toolbar.setStyleSheet(
+            "QFrame#mediaHubWebToolbar {{ background: {}; border: 1px solid {}; "
+            "border-radius: 8px; }}".format(panel, edge))
+        self.web_bookmarks.setStyleSheet(
+            "QFrame#mediaHubBookmarks {{ background: {}; border: 1px solid {}; "
+            "border-radius: 7px; }}".format(bg, edge))
+        self.web_empty_card.setStyleSheet(
+            "QFrame#mediaHubWebEmpty {{ background: {}; border: 1px dashed {}; "
+            "border-radius: 9px; }}".format(bg, edge))
+        self.web_mode_badge.setStyleSheet(
+            "color: {}; font-size: 10px; font-weight: 600; padding: 3px 5px;".format(fg))
+        self.web_open_external.setStyleSheet("")  # styled below with all navigation buttons
+        for widget in self.browser_page.findChildren(QPushButton):
+            name = widget.objectName()
+            if name in ("mediaHubWebNav", "mediaHubWebQuicklink"):
+                widget.setStyleSheet(
+                    "QPushButton {{ background: {}; color: {}; border: 1px solid {}; "
+                    "border-radius: 6px; padding: 3px 6px; }} "
+                    "QPushButton:hover {{ background: {}; }}".format(bg, fg, edge, hover))
+            elif name in ("mediaHubWebGo", "mediaHubWebFallback"):
+                widget.setStyleSheet(
+                    "QPushButton {{ background: {}; color: white; border: none; "
+                    "border-radius: 6px; font-weight: 600; padding: 4px 8px; }} "
+                    "QPushButton:hover {{ background: #256b9d; }}".format(
+                        "#317fae" if dark else "#287fb6"))
+        self.address.setStyleSheet(
+            "QLineEdit {{ background: {}; color: {}; border: 1px solid {}; "
+            "border-radius: 5px; padding: 4px 6px; }}".format(bg, fg, edge))
+        self.web_placeholder.setStyleSheet(
+            "color: {}; font-size: 12px;".format(fg))
+        for widget in self.web_empty_card.findChildren(QLabel, "mediaHubWebEmptyIcon"):
+            widget.setStyleSheet("font-size: 40px; color: {};".format(
+                "#88b1d0" if dark else "#8aafc6"))
 
     def _initialize_web(self):
         if self._web_initialized:
@@ -1248,22 +1653,31 @@ class MediaHubDock(QDockWidget):
             self.web.urlChanged.connect(self._web_url_changed)
             self.web.loadFinished.connect(self._web_finished)
             self.web.page().fullScreenRequested.connect(self._web_fullscreen_requested)
-            self.web_placeholder.hide()
+            self.web_empty_card.hide()
             self.web_container.addWidget(self.web)
-            self.web_info.setText("Chromium intégré (Qt WebEngine). Certaines vidéos et connexions protégées peuvent échouer.")
+            self.web_mode_badge.setText("CHROMIUM")
+            self.web_info.setText(tr_ui("Chromium intégré (Qt WebEngine). Certaines vidéos et connexions protégées peuvent échouer."))
             # Pas de requête Internet au démarrage tant que l'utilisateur n'a pas choisi de site.
             self._navigate(str(self.prefs.value(SETTINGS + "web_last", "https://www.youtube.com/") or "https://www.youtube.com/"))
         except Exception as exc:
             self.web = None
-            self.web_placeholder.setText(
-                "Navigateur intégré indisponible.\n\n"
-                "L'onglet reste utilisable : les adresses et les raccourcis "
-                "s'ouvrent dans ton navigateur Windows.\n\n"
-                "Pour intégrer Chromium : OSGeo4W Setup → Advanced Install → "
-                "python3-pyqtwebengine → Installer → redémarrer QGIS.\n\n"
-                "Diagnostic : {}".format(exc))
-            self.web_info.setText("Mode navigateur externe (plus rapide pour YouTube). "
-                                  "Impossible d'embarquer Chromium sans PyQtWebEngine.")
+            self.web_mode_badge.setText("EXTERNAL")
+            if language() == "en":
+                self.web_placeholder.setText(
+                    "Embedded browser unavailable.\n\n"
+                    "Website addresses and shortcuts open in your default browser.\n\n"
+                    "To enable Chromium: OSGeo4W Setup → Advanced Install → "
+                    "python3-pyqtwebengine → Install → restart QGIS.\n\n"
+                    "Details: {}".format(exc))
+            else:
+                self.web_placeholder.setText(
+                    "Navigateur intégré indisponible.\n\n"
+                    "Les adresses et raccourcis s'ouvrent dans ton navigateur Windows.\n\n"
+                    "Pour intégrer Chromium : OSGeo4W Setup → Advanced Install → "
+                    "python3-pyqtwebengine → Installer → redémarrer QGIS.\n\n"
+                    "Diagnostic : {}".format(exc))
+            self.web_info.setText(tr_ui("Mode navigateur externe (plus rapide pour YouTube). "
+                                  "Impossible d'embarquer Chromium sans PyQtWebEngine."))
 
     @staticmethod
     def _to_web_url(text):
@@ -1413,6 +1827,7 @@ class MediaHubDock(QDockWidget):
         self.radio_scroll = page_scroll
         page_scroll.viewport().installEventFilter(self)
         content = QWidget()
+        content.setObjectName("radioContent")
         lay = QVBoxLayout(content)
         lay.setContentsMargins(8, 12, 8, 8)
         lay.setSpacing(8)
@@ -1420,7 +1835,27 @@ class MediaHubDock(QDockWidget):
         page_layout.addWidget(page_scroll)
         lay.addWidget(title("Écouter la radio"))
         lay.addWidget(label("Flux directs, sans charger tout le site web.", True))
-        lay.addWidget(label("Choisis une station en cliquant sur son image."))
+        lay.addWidget(label("Choisis un pays puis clique sur une station."))
+        country_row = QHBoxLayout()
+        country_row.addWidget(QLabel("Pays"))
+        self.radio_country_combo = QComboBox()
+        for code, display in COUNTRIES:
+            self.radio_country_combo.addItem(display, code)
+        country_value = str(self.prefs.value(SETTINGS + "radio_country", "FR"))
+        if country_value in ("FR_TOP", "FR_ALL"):
+            country_value = "FR"  # Migrate QGIS 1.5.0 settings.
+        country_index = self.radio_country_combo.findData(country_value)
+        if country_index >= 0:
+            self.radio_country_combo.setCurrentIndex(country_index)
+        country_row.addWidget(self.radio_country_combo, 1)
+        self.country_refresh = make_button("↻", self._refresh_country_catalog,
+                                           "Actualiser les cinq radios de ce pays")
+        self.country_refresh.setFixedSize(30, 28)
+        country_row.addWidget(self.country_refresh)
+        lay.addLayout(country_row)
+        self.country_info = label("France : cinq stations populaires.", True)
+        lay.addWidget(self.country_info)
+        self.radio_country_combo.currentIndexChanged.connect(self._on_country_changed)
         # Combo cachée : conserve la logique de sélection des versions précédentes.
         self.station_combo = QComboBox()
         self.station_combo.hide()
@@ -1474,8 +1909,18 @@ class MediaHubDock(QDockWidget):
         self.custom_stream = QLineEdit()
         self.custom_stream.setPlaceholderText("https://…/stream.mp3 ou .m3u8")
         lay.addWidget(self.custom_stream)
+        country_custom_row = QHBoxLayout()
+        country_custom_row.addWidget(QLabel("Pays de cette station"))
+        self.custom_country = QComboBox()
+        for country_code, country_display in COUNTRIES:
+            self.custom_country.addItem(country_display, country_code)
+        country_custom_row.addWidget(self.custom_country, 1)
+        lay.addLayout(country_custom_row)
+        self.radio_country_combo.currentIndexChanged.connect(self._sync_custom_country)
+        self._sync_custom_country()
         extras = QHBoxLayout()
         extras.addWidget(make_button("+ Ajouter", self.add_station))
+        extras.addWidget(make_button("Changer de pays", self.move_station_country))
         extras.addWidget(make_button("Supprimer la station", self.remove_station))
         lay.addLayout(extras)
         self.radio_status = label("Choisis une station puis clique sur Écouter.", True)
@@ -1496,21 +1941,159 @@ class MediaHubDock(QDockWidget):
         self.radio_name = "RTL"
 
     def _load_radio_presets(self):
-        raw = self.prefs.value(SETTINGS + "user_radios", "[]")
+        """Migrate 1.x custom stations once, without losing user edits."""
+        marker = SETTINGS + "user_radios_v2"
+        saved = self.prefs.value(marker, None)
+        is_migration = saved is None
+        if is_migration:
+            saved = self.prefs.value(SETTINGS + "user_radios", "[]")
         try:
-            data = json.loads(raw) if isinstance(raw, str) else []
-        except (ValueError, TypeError):
+            data = json.loads(saved) if isinstance(saved, str) else saved
+        except (TypeError, ValueError):
             data = []
-        self.radio_presets = list(DEFAULT_RADIOS)
-        names = {name.casefold() for name, _ in self.radio_presets}
-        for item in data:
-            if (isinstance(item, list) and len(item) == 2 and
-                    isinstance(item[0], str) and isinstance(item[1], str) and
-                    item[1].startswith(("https://", "http://")) and
-                    item[0].casefold() not in names):
-                self.radio_presets.append((item[0], item[1]))
-                names.add(item[0].casefold())
+        self.user_radios = normalize_saved_stations_v2(data)
+        if is_migration:
+            self._save_stations()  # Never import old data a second time.
+        self._country_catalogs = {"FR": [(name, RADIO_ALTERNATIVES[name][0])
+                                         for name in FRANCE_FEATURED]}
+        for code, _ in COUNTRIES:
+            if code in ("FR", "PERSONAL"):
+                continue
+            raw_cache = self.prefs.value(SETTINGS + "country_cache_" + code, "[]")
+            try:
+                entries = json.loads(raw_cache) if isinstance(raw_cache, str) else []
+            except (ValueError, TypeError):
+                entries = []
+            valid_entries = parse_directory_stations(entries)
+            if valid_entries:
+                self._country_catalogs[code] = [(item["name"], item["url"])
+                                                for item in valid_entries]
+                self._country_homepages[code] = {item["name"]: item["homepage"]
+                                                 for item in valid_entries}
+        self._update_country_radios()
+        code = self.radio_country_combo.currentData()
+        if code not in ("FR", "PERSONAL"):
+            self._request_country_top(code)
+
+    def _sync_custom_country(self, unused=None):
+        """Preselect the current country when adding a personal station."""
+        code = self.radio_country_combo.currentData() or "FR"
+        index = self.custom_country.findData(code)
+        if index >= 0:
+            self.custom_country.setCurrentIndex(index)
+
+    def _on_country_changed(self, unused=None):
+        code = self.radio_country_combo.currentData()
+        if not code:
+            return
+        self.prefs.setValue(SETTINGS + "radio_country", code)
+        self._update_country_radios()
+        if code not in ("FR", "PERSONAL"):
+            self._request_country_top(code)
+
+    def _update_country_radios(self):
+        code = self.radio_country_combo.currentData() or "FR"
+        builtins = list(self._country_catalogs.get(code, []))
+        self._radio_builtin_count = len(builtins)
+        seen = {name.casefold() for name, url in builtins}
+        custom = [(name, url) for name, url in stations_for_country(self.user_radios, code)
+                  if name.casefold() not in seen]
+        self.radio_presets = builtins + custom
+        if code == "FR":
+            description = "France : cinq radios populaires, dont RTL et Franceinfo."
+        elif code == "PERSONAL":
+            description = "Radios non classées : attribue-leur un pays lors de l'ajout."
+        elif builtins:
+            description = "Cinq stations populaires sur Radio Browser (classement non officiel)."
+        else:
+            description = "Annuaire en ligne nécessaire pour ce pays."
+        self.country_info.setProperty("mediahub_original_label", description)
+        self.country_info.setText(tr_ui(description))
         self._refresh_radios()
+
+    def _refresh_country_catalog(self):
+        code = self.radio_country_combo.currentData()
+        if code in ("FR", "PERSONAL"):
+            self._update_country_radios()
+            return
+        self.prefs.setValue(SETTINGS + "country_updated_" + code, 0)
+        self._request_country_top(code)
+
+    def _request_country_top(self, code):
+        """Nonblocking QGIS-network request; retains cached stations on error."""
+        if code in ("FR", "PERSONAL"):
+            return
+        now = time.time()
+        last = float(self.prefs.value(SETTINGS + "country_updated_" + code, 0) or 0)
+        if self._country_catalogs.get(code) and now - last < 12 * 3600:
+            return
+        if self._directory_reply is not None:
+            previous = self._directory_reply
+            self._directory_reply = None
+            previous.abort()
+            previous.deleteLater()
+        try:
+            from qgis.core import QgsNetworkAccessManager
+            params = urlencode({"countrycode": code, "order": "clickcount",
+                                "reverse": "true", "hidebroken": "true", "limit": 40})
+            url = QUrl("https://de1.api.radio-browser.info/json/stations/search?" + params)
+            req = QNetworkRequest(url)
+            req.setRawHeader(b"User-Agent", b"QGIS-Media-Hub/1.5.0 (+https://github.com/JulienH77/qgis-media-hub)")
+            req.setRawHeader(b"Accept", b"application/json")
+            # Qt5 sometimes defaults to manual redirects on corporate systems.
+            if hasattr(QNetworkRequest.Attribute, "RedirectPolicyAttribute"):
+                req.setAttribute(QNetworkRequest.Attribute.RedirectPolicyAttribute,
+                                 QNetworkRequest.RedirectPolicy.NoLessSafeRedirectPolicy)
+            reply = QgsNetworkAccessManager.instance().get(req)
+            self._directory_reply = reply
+            reply.finished.connect(lambda r=reply, c=code: self._country_response(r, c))
+            QTimer.singleShot(12000, lambda r=reply: self._country_timeout(r))
+            if not self._country_catalogs.get(code):
+                self.country_info.setText(tr_ui("Recherche des cinq radios les plus consultées…"))
+        except Exception as exc:
+            self._set_country_error(code, str(exc))
+
+    def _country_timeout(self, reply):
+        if reply is self._directory_reply and not reply.isFinished():
+            reply.abort()
+
+    def _country_response(self, reply, code):
+        if reply is not self._directory_reply:
+            reply.deleteLater()
+            return
+        self._directory_reply = None
+        try:
+            status = reply.attribute(QNetworkRequest.Attribute.HttpStatusCodeAttribute)
+            if reply.error() != QNetworkReply.NetworkError.NoError:
+                raise ValueError(reply.errorString())
+            if status is None or int(status) != 200:
+                raise ValueError("Réponse HTTP {}".format(status))
+            raw = bytes(reply.readAll())
+            if len(raw) > 256 * 1024:
+                raise ValueError("Réponse de l'annuaire trop volumineuse")
+            entries = parse_directory_stations(json.loads(raw.decode("utf-8")))
+            if not entries:
+                raise ValueError("Aucune radio accessible dans l'annuaire")
+            self._country_catalogs[code] = [(v["name"], v["url"]) for v in entries]
+            self._country_homepages[code] = {v["name"]: v["homepage"] for v in entries}
+            self.prefs.setValue(SETTINGS + "country_cache_" + code,
+                                json.dumps(entries, ensure_ascii=False))
+            self.prefs.setValue(SETTINGS + "country_updated_" + code, time.time())
+            if self.radio_country_combo.currentData() == code:
+                self._update_country_radios()
+        except (ValueError, TypeError, UnicodeError) as exc:
+            self._set_country_error(code, str(exc))
+        finally:
+            reply.deleteLater()
+
+    def _set_country_error(self, code, detail):
+        if self.radio_country_combo.currentData() == code:
+            if self._country_catalogs.get(code):
+                self.country_info.setText(tr_ui("Liste précédemment enregistrée (actualisation impossible)."))
+            else:
+                self.country_info.setText(tr_ui(
+                    "Annuaire inaccessible. Réessaie sur un autre réseau ou ajoute tes propres stations."))
+            self.country_info.setToolTip("Radio Browser : " + str(detail))
 
     def _refresh_radios(self):
         current = self.station_combo.currentText()
@@ -1542,7 +2125,7 @@ class MediaHubDock(QDockWidget):
         }.get(name)
         if logo:
             return QIcon(os.path.join(os.path.dirname(__file__), "radio_icons", logo))
-        # Radios personnalisées : nom directement dans le carré.
+        # Radios sans logo : initiales lisibles + nom complet sous le carré.
         img = QPixmap(180, 180)
         img.fill(QColor("#eef2f5"))
         painter = QPainter(img)
@@ -1550,58 +2133,73 @@ class MediaHubDock(QDockWidget):
         painter.setPen(QColor("#34495e"))
         font = QFont()
         font.setBold(True)
-        font.setPointSize(10 if len(name) <= 12 else 8)
+        font.setPointSize(29)
         painter.setFont(font)
         rect = img.rect().adjusted(8, 8, -8, -8)
-        painter.drawText(rect, int(Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap), name)
+        initials = "".join(part[0] for part in name.split()[:2]).upper() or "♪"
+        painter.drawText(rect, int(Qt.AlignmentFlag.AlignCenter), initials)
         painter.end()
         return QIcon(img)
 
     def _render_radio_tiles(self):
-        # Images carrées compactes, sans carte extensible ni légende sous l’icône.
+        """Compact icons with a readable station name beneath every square."""
         while self.radio_grid.count():
             item = self.radio_grid.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
         self._station_tiles = []
+        self._radio_cells = []
         for ix, (name, _) in enumerate(self.radio_presets):
-            tile = QToolButton(self.radio_grid_content)
+            cell = QWidget(self.radio_grid_content)
+            cell.setObjectName("mediaHubRadioCell")
+            cell.setFixedWidth(90)
+            cell_layout = QVBoxLayout(cell)
+            cell_layout.setContentsMargins(1, 1, 1, 0)
+            cell_layout.setSpacing(3)
+            tile = QToolButton(cell)
             tile.setObjectName("mediaHubStationTile")
             tile.setIcon(self._radio_tile_icon(name))
             tile.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-            tile.setIconSize(QSize(84, 84))
-            tile.setFixedSize(94, 94)
+            tile.setIconSize(QSize(68, 68))
+            tile.setFixedSize(80, 80)
             tile.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-            tile.setToolTip("Écouter {}".format(name))
-            tile.setAccessibleName("Écouter {}".format(name))
+            tile.setToolTip("{} {}".format(tr_ui("Écouter"), name))
+            tile.setAccessibleName("{} {}".format(tr_ui("Écouter"), name))
             tile.setCheckable(True)
             tile.clicked.connect(lambda checked=False, index=ix: self._select_radio_tile(index))
-            tile.setStyleSheet(
-                "QToolButton#mediaHubStationTile { background: #ffffff; border: 1px solid #d8dfe5; "
-                "border-radius: 5px; padding: 2px; } "
-                "QToolButton#mediaHubStationTile:hover { border-color: #89b4db; background: #f4f9ff; } "
-                "QToolButton#mediaHubStationTile:checked { border: 2px solid #3988c9; background: #eaf3fc; }"
-            )
+            caption = QLabel(name, cell)
+            caption.setObjectName("mediaHubStationCaption")
+            caption.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+            caption.setWordWrap(True)
+            caption.setFixedWidth(88)
+            caption.setFixedHeight(32)
+            caption.setToolTip(name)
+            cell_layout.addWidget(tile, 0, Qt.AlignmentFlag.AlignHCenter)
+            cell_layout.addWidget(caption, 0, Qt.AlignmentFlag.AlignHCenter)
             self._station_tiles.append(tile)
+            self._radio_cells.append(cell)
+        self._radio_columns = None
         self._layout_radio_tiles()
         self._highlight_radio_tile(self.station_combo.currentIndex())
+        self._style_radio_tiles()
 
     def _layout_radio_tiles(self):
-        """Wrap fixed-size tiles into 2-5 columns as the dock is resized."""
+        """Arrange 90-pixel cells in responsive columns, without stretching logos."""
         if not self._station_tiles:
             return
         width = self.radio_grid_content.width()
         if hasattr(self, "radio_scroll"):
-            width = self.radio_scroll.viewport().width() - 20
-        # Each cell needs 94 px plus 8 px spacing.
-        columns = max(2, min(5, (max(210, width) + 8) // 102))
-        if getattr(self, "_radio_columns", None) == columns and self.radio_grid.count() == len(self._station_tiles):
+            width = self.radio_scroll.viewport().width() - 16
+        cell_size = 98  # 90 px tile + 8 px grid gap
+        columns = max(2, min(6, max(200, width) // cell_size))
+        if (getattr(self, "_radio_columns", None) == columns
+                and self.radio_grid.count() == len(self._radio_cells)):
             return
         self._radio_columns = columns
         while self.radio_grid.count():
             self.radio_grid.takeAt(0)
-        for ix, tile in enumerate(self._station_tiles):
-            self.radio_grid.addWidget(tile, ix // columns, ix % columns,
+        for ix, cell in enumerate(self._radio_cells):
+            self.radio_grid.addWidget(cell, ix // columns, ix % columns,
                                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self.radio_grid.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
 
@@ -1642,7 +2240,14 @@ class MediaHubDock(QDockWidget):
         if self._radio_relay and not self._radio_relay_active:
             self._radio_relay._cancel_active()
         primary = str(self.station_combo.currentData() or "")
-        candidates = list(RADIO_ALTERNATIVES.get(self.radio_name, []))
+        country = self.radio_country_combo.currentData()
+        # Do not accidentally fall back to France's RTL if an unrelated
+        # foreign broadcaster has the same station name.
+        candidates = (list(RADIO_ALTERNATIVES.get(self.radio_name, []))
+                      if country == "FR" and
+                      self.radio_name in dict(self._country_catalogs.get(country, [])) and
+                      primary == dict(self._country_catalogs.get(country, [])).get(self.radio_name)
+                      else [])
         if primary and primary not in candidates:
             candidates.insert(0, primary)
         self._radio_sources = list(dict.fromkeys(candidates))
@@ -1660,7 +2265,7 @@ class MediaHubDock(QDockWidget):
         if self._radio_attempt_index >= len(self._radio_sources):
             # Toutes les adresses ont echoue. Ne pas rester sur "Connexion...".
             self.loaded = False
-            self.radio_play_btn.setText("▶ Réessayer")
+            self.radio_play_btn.setText(tr_ui("▶ Réessayer"))
             self._set_radio_status(
                 "Impossible de lire {} ({} flux essayés). {}. "
                 "Teste « Dans VLC » : si ça échoue aussi, le réseau bloque peut-être la radio.".format(
@@ -1669,7 +2274,7 @@ class MediaHubDock(QDockWidget):
             return
         url = self._radio_sources[self._radio_attempt_index]
         self._radio_last_url = url
-        self.radio_play_btn.setText("Connexion…")
+        self.radio_play_btn.setText(tr_ui("Connexion…"))
         self.radio_detail.setText("Moteur : {} · Connexion : {} · Flux {}/{} · {}".format(
             self.engine.upper(), "réseau QGIS" if self._radio_relay_active else "VLC direct",
             self._radio_attempt_index + 1, len(self._radio_sources), url))
@@ -1748,7 +2353,7 @@ class MediaHubDock(QDockWidget):
             self.current_source = None
             self.current_kind = None
             self.loaded = False
-            self.radio_play_btn.setText("▶ Écouter")
+            self.radio_play_btn.setText(tr_ui("▶ Écouter"))
             self._set_radio_status("Radio arrêtée.")
 
     def copy_radio_url(self):
@@ -1777,7 +2382,13 @@ class MediaHubDock(QDockWidget):
             "Fun Radio": "https://www.funradio.fr/",
         }
         name = self.station_combo.currentText()
-        url = sites.get(name) or str(self.station_combo.currentData() or "")
+        code = self.radio_country_combo.currentData()
+        homepage = self._country_homepages.get(code, {}).get(name, "")
+        # A foreign station may share a name with a French preset.
+        if code == "FR":
+            url = sites.get(name) or str(self.station_combo.currentData() or "")
+        else:
+            url = homepage or str(self.station_combo.currentData() or "")
         if not url.startswith(("https://", "http://")):
             self._set_radio_status("Aucun site valide pour cette station.", True)
             return
@@ -1837,7 +2448,7 @@ class MediaHubDock(QDockWidget):
         if self._radio_relay:
             self._radio_relay._cancel_active()
         self.play_source("local", path, "radio")
-        self.radio_play_btn.setText("▶ Écouter")
+        self.radio_play_btn.setText(tr_ui("▶ Écouter"))
         self._set_radio_status("Test audio local : un bip discret doit être audible.")
         self.radio_detail.setText("Test sonore local, sans connexion Internet · {}".format(
             self.engine.upper()))
@@ -1849,39 +2460,85 @@ class MediaHubDock(QDockWidget):
     def add_station(self):
         name = self.custom_name.text().strip()
         stream = self.custom_stream.text().strip()
-        if not name or not stream.startswith(("http://", "https://")):
-            self._set_radio_status("Indique un nom et un lien de flux HTTP(S) valide.", True)
+        code = self.custom_country.currentData() or "PERSONAL"
+        if not name or not valid_stream_url(stream):
+            self._set_radio_status("Indique un nom et un flux HTTP(S) valide.", True)
             return
-        if len(name) > 70 or len(stream) > 2048:
-            self._set_radio_status("Nom ou adresse trop long.", True)
+        if len(name) > 70:
+            self._set_radio_status("Nom trop long (70 caractères maximum).", True)
             return
-        if name.casefold() in (n.casefold() for n, _ in self.radio_presets):
-            self._set_radio_status("Une station de ce nom existe déjà.", True)
+        # Duplicate names are allowed across *different countries*, but
+        # never within the same country's displayed station grid.
+        existing = {item["name"].casefold() for item in self.user_radios
+                    if item["country"] == code}
+        builtins = {n.casefold() for n, _ in self._country_catalogs.get(code, [])}
+        if name.casefold() in existing | builtins:
+            self._set_radio_status("Une station de ce nom existe déjà dans ce pays.", True)
             return
-        self.radio_presets.append((name, stream))
+        self.user_radios.append({"name": name, "url": stream, "country": code})
         self._save_stations()
-        self._refresh_radios()
+        index = self.radio_country_combo.findData(code)
+        if index >= 0:
+            self.radio_country_combo.setCurrentIndex(index)
+        self._update_country_radios()
         self.station_combo.setCurrentIndex(self.station_combo.findText(name))
         self._highlight_radio_tile(self.station_combo.currentIndex())
         self.custom_name.clear()
         self.custom_stream.clear()
-        self._set_radio_status("Station ajoutée.")
+        self._set_radio_status("Station personnelle ajoutée.")
+
+    def move_station_country(self):
+        """Reassign a saved personal station without losing its stream URL."""
+        name = self.station_combo.currentText()
+        url = self.station_combo.currentData()
+        source_code = self.radio_country_combo.currentData()
+        target_code = self.custom_country.currentData()
+        index = next((ix for ix, item in enumerate(self.user_radios)
+                      if item["name"] == name and item["url"] == url
+                      and item["country"] == source_code), -1)
+        if index < 0:
+            self._set_radio_status("Choisis une radio personnelle à déplacer.", True)
+            return
+        if source_code == target_code:
+            return
+        existing = {item["name"].casefold() for item in self.user_radios
+                    if item["country"] == target_code}
+        builtins = {n.casefold() for n, _ in self._country_catalogs.get(target_code, [])}
+        if name.casefold() in existing | builtins:
+            self._set_radio_status("Une station de ce nom existe déjà dans ce pays.", True)
+            return
+        self.user_radios[index]["country"] = target_code
+        self._save_stations()
+        country_index = self.radio_country_combo.findData(target_code)
+        if country_index >= 0:
+            self.radio_country_combo.setCurrentIndex(country_index)
+        self._update_country_radios()
+        self.station_combo.setCurrentIndex(self.station_combo.findText(name))
+        self._highlight_radio_tile(self.station_combo.currentIndex())
+        self._set_radio_status("Station déplacée vers le pays choisi.")
 
     def remove_station(self):
-        ix = self.station_combo.currentIndex()
-        if ix < len(DEFAULT_RADIOS):
-            self._set_radio_status("Les stations intégrées ne peuvent pas être supprimées.")
-            return
-        if ix < 0:
-            return
         name = self.station_combo.currentText()
-        del self.radio_presets[ix]
+        code = self.radio_country_combo.currentData()
+        url = self.station_combo.currentData()
+        if not name:
+            return
+        index = next((ix for ix, item in enumerate(self.user_radios)
+                      if item["name"] == name and item["country"] == code
+                      and item["url"] == url), -1)
+        if index < 0:
+            self._set_radio_status("Les stations proposées ne peuvent pas être supprimées.")
+            return
+        if self.current_kind == "radio" and self.radio_name == name:
+            self.stop_radio()
+        del self.user_radios[index]
         self._save_stations()
-        self._refresh_radios()
+        self._update_country_radios()
         self._set_radio_status("Station « {} » supprimée.".format(name))
 
     def _save_stations(self):
-        self.prefs.setValue(SETTINGS + "user_radios", json.dumps(self.radio_presets[len(DEFAULT_RADIOS):], ensure_ascii=False))
+        self.prefs.setValue(SETTINGS + "user_radios_v2",
+                            json.dumps(self.user_radios, ensure_ascii=False))
 
     # ------ NOTES ------
     def _create_notes_tab(self):
@@ -1913,7 +2570,7 @@ class MediaHubDock(QDockWidget):
         QApplication.clipboard().setText(self.notes.toPlainText())
 
     def _clear_notes(self):
-        if QMessageBox.question(self, "Effacer les notes", "Effacer toutes les notes enregistrées ?",
+        if QMessageBox.question(self, tr_ui("Effacer les notes"), tr_ui("Effacer toutes les notes enregistrées ?"),
                                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
             self.notes.clear()
             self._save_notes()
@@ -1947,7 +2604,7 @@ class MediaHubDock(QDockWidget):
             edit = QKeySequenceEdit(QKeySequence(self._shortcut_bindings[action]))
             edit.setToolTip("Appuie sur la touche souhaitée (une seule combinaison).")
             edits[action] = edit
-            form.addRow(caption, edit)
+            form.addRow(tr_ui(caption), edit)
         key_layout.addLayout(form)
         reset = make_button("Raccourcis par défaut", lambda: [
             edits[action].setKeySequence(QKeySequence(default))
@@ -1964,16 +2621,38 @@ class MediaHubDock(QDockWidget):
         radio_network = QCheckBox("Utiliser le réseau / proxy QGIS pour la radio")
         radio_network.setChecked(self.use_qgis_network.isChecked())
         prefs_layout.addWidget(radio_network)
+        language_row = QHBoxLayout()
+        language_row.addWidget(QLabel("Langue de l'interface"))
+        language_combo = QComboBox()
+        language_combo.addItem("Automatique (QGIS / système)", "auto")
+        language_combo.addItem("Français", "fr")
+        language_combo.addItem("English", "en")
+        selected_lang = str(self.prefs.value(SETTINGS + "ui_language", "auto"))
+        index = language_combo.findData(selected_lang)
+        language_combo.setCurrentIndex(max(0, index))
+        language_row.addWidget(language_combo, 1)
+        prefs_layout.addLayout(language_row)
+        cinema_enabled = QCheckBox("Mode sombre dans Media Hub et le PiP")
+        cinema_enabled.setChecked(self._dark_mode)
+        prefs_layout.addWidget(cinema_enabled)
+        controls_hidden = QCheckBox("Replier les commandes du PiP par défaut")
+        controls_hidden.setChecked(self._popup._controls_hidden if self._popup else
+                                   str(self.prefs.value(SETTINGS + "pip_controls_hidden", "false")).lower()
+                                   in ("true", "1"))
+        prefs_layout.addWidget(controls_hidden)
+        prefs_layout.addWidget(label(
+            "Le bouton Afficher/Masquer reste toujours visible en plein écran "
+            "(H par défaut). Le mode sombre ne modifie pas le thème général de QGIS.", True))
         prefs_layout.addWidget(label(
             "Un proxy professionnel peut limiter l'accès aux radios même si "
             "la navigation Web fonctionne.", True))
-        current_volume = QLabel("Volume actuel : {} %".format(self.volume_slider.value()))
+        current_volume = QLabel(tr_ui("Volume actuel : {} %").format(self.volume_slider.value()))
         prefs_layout.addWidget(current_volume)
         volume = QSlider(Qt.Orientation.Horizontal)
         volume.setRange(0, 200 if self.engine == "vlc" else 100)
         volume.setValue(self.volume_slider.value())
         volume.valueChanged.connect(
-            lambda value: current_volume.setText("Volume actuel : {} %".format(value)))
+            lambda value: current_volume.setText(tr_ui("Volume actuel : {} %").format(value)))
         prefs_layout.addWidget(volume)
         prefs_layout.addWidget(label(
             "Les notes, les favoris Web et le dossier vidéo sont enregistrés "
@@ -1990,8 +2669,9 @@ class MediaHubDock(QDockWidget):
         diag_layout.addWidget(label("Web : {}".format(
             "Qt WebEngine disponible" if self.web else
             "WebEngine absent/non chargé — navigateur externe possible")))
-        diag_layout.addWidget(label("15 stations nationales préinstallées. "
-                                    "Les flux peuvent changer ou être bloqués par le réseau."))
+        diag_layout.addWidget(label(
+            "France : cinq stations intégrées dont RTL et Franceinfo. Autres pays : "
+            "cinq stations de Radio Browser. Radios personnelles classées par pays."))
         diag_layout.addWidget(make_button("Ouvrir les problèmes GitHub", lambda:
             QDesktopServices.openUrl(QUrl("https://github.com/JulienH77/qgis-media-hub/issues"))))
         diag_layout.addStretch(1)
@@ -2002,6 +2682,7 @@ class MediaHubDock(QDockWidget):
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         outer.addWidget(buttons)
+        apply_localization(dialog)
         if dialog.exec_() != QDialog.Accepted:
             return
 
@@ -2009,15 +2690,14 @@ class MediaHubDock(QDockWidget):
         for action, edit in edits.items():
             value = edit.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
             if not value or "," in value or value in ("Esc", "Escape", "Tab", "Backtab"):
-                QMessageBox.warning(self, "Media Hub — Raccourcis",
-                                    "Raccourci invalide pour « {} ». "
-                                    "Définis une combinaison unique, hors Échap et Tab.".format(
-                                        DEFAULT_VIDEO_SHORTCUTS[action][0]))
+                QMessageBox.warning(self, tr_ui("Media Hub — Raccourcis"),
+                                    tr_ui("Raccourci invalide pour « {} ». Définis une combinaison unique, hors Échap et Tab.").format(
+                                        tr_ui(DEFAULT_VIDEO_SHORTCUTS[action][0])))
                 return
             values[action] = value
         if len(set(values.values())) != len(values):
-            QMessageBox.warning(self, "Media Hub — Raccourcis",
-                                "Une même combinaison a été attribuée plusieurs fois.")
+            QMessageBox.warning(self, tr_ui("Media Hub — Raccourcis"),
+                                tr_ui("Une même combinaison a été attribuée plusieurs fois."))
             return
         self._shortcut_bindings = values
         self._shortcut_enabled = shortcuts_enabled.isChecked()
@@ -2027,8 +2707,21 @@ class MediaHubDock(QDockWidget):
         self.start_checkbox.setChecked(start_enabled.isChecked())
         self.use_qgis_network.setChecked(radio_network.isChecked())
         self.volume_slider.setValue(volume.value())
+        self.prefs.setValue(SETTINGS + "ui_language", language_combo.currentData())
+        self._dark_mode = cinema_enabled.isChecked()
+        self.prefs.setValue(SETTINGS + "dark_mode", self._dark_mode)
+        self._apply_theme()
+        self._apply_language()
+        self.prefs.setValue(SETTINGS + "pip_controls_hidden", controls_hidden.isChecked())
+        if self._popup is not None:
+            self._popup.set_controls_hidden(controls_hidden.isChecked())
 
     def shutdown(self):
+        if self._directory_reply is not None:
+            pending = self._directory_reply
+            self._directory_reply = None
+            pending.abort()
+            pending.deleteLater()
         if self._radio_relay:
             self._radio_relay.shutdown()
             self._radio_relay = None

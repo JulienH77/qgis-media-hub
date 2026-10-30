@@ -7,6 +7,8 @@ from qgis.PyQt.QtCore import Qt, QSettings
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QMessageBox
 
+from .i18n import tr_ui
+
 
 class MediaHubPlugin:
     MENU = "&Media Hub"
@@ -20,10 +22,10 @@ class MediaHubPlugin:
 
     def initGui(self):  # noqa: N802
         self.action = QAction(QIcon(str(Path(__file__).with_name("icon.svg"))),
-                              "Media Hub — Vidéo, Web, Radio (JulienH77)", self.iface.mainWindow())
+                              tr_ui("Media Hub — Vidéo, Web, Radio (JulienH77)"), self.iface.mainWindow())
         self.action.setObjectName("qgisMediaHubAction")
         self.action.setCheckable(True)
-        self.action.setToolTip("Media Hub — par JulienH77 · QGIS 3.44")
+        self.action.setToolTip(tr_ui("Media Hub — par JulienH77 · QGIS 3.44"))
         self.action.toggled.connect(self._toggle)
         self.iface.addPluginToMenu(self.MENU, self.action)
 
@@ -51,8 +53,8 @@ class MediaHubPlugin:
                 self.action.blockSignals(True)
                 self.action.setChecked(False)
                 self.action.blockSignals(False)
-                QMessageBox.warning(self.iface.mainWindow(), "Media Hub — Erreur",
-                                    "Impossible d'ouvrir le panneau :\n\n{}".format(exc))
+                QMessageBox.warning(self.iface.mainWindow(), tr_ui("Media Hub — Erreur"),
+                                    tr_ui("Impossible d'ouvrir le panneau :\n\n{}").format(exc))
                 self.dock = None
                 return
         self.dock.show()
