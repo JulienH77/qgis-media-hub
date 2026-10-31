@@ -1,3 +1,11 @@
+## 1.5.1 — Compatibility and installation fixes
+
+- Fixed the Flake8 E741 ambiguous identifier in the VLC binding layer.
+- Updated the settings dialog to use Qt's scoped DialogCode and `exec()` API.
+- Kept compatibility for optional Qt multimedia and WebEngine installations, avoiding direct static imports from `PyQt5`.
+- Documented why GitHub source archives are not directly installable QGIS plugin ZIPs.
+- No intentional changes to the video, radio, Web, or notes features.
+
 # Changelog
 
 ## 1.5.0 — 2026-10-30 (revised build)

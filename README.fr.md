@@ -1,4 +1,4 @@
-# Media Hub 1.5.0 — extension QGIS
+# Media Hub 1.5.1 — extension QGIS
 
 **Media Hub** est une extension pour **QGIS 3.44.x (Qt5) sur Windows 64 bits**, développée par [JulienH77](https://github.com/JulienH77), sous licence MIT.
 
@@ -37,7 +37,21 @@ Les préférences et les listes de radios précédemment récupérées sont cons
 
 Historique détaillé : [CHANGELOG.md](CHANGELOG.md). Source : https://github.com/JulienH77/qgis-media-hub
 
-### Ajustements de l’interface (Media Hub 1.5.0)
+### Ajustements de l’interface (Media Hub 1.5.1)
 La fenêtre vidéo flottante et le plein écran possèdent une barre de progression synchronisée, avec les temps écoulé et total. Le volume compact permet de couper le son ou d’amplifier VLC jusqu’à 200 %, et le champ de vitesse est identique à celui du panneau QGIS : saisie directe de 0,1× à 5,0×, par pas de 0,1. Les commandes restent repliables avec le bouton Afficher/Masquer ou le raccourci H.
 
 Les radios ont des carrés réduits et leurs noms sous les images ; les stations sans logo affichent des initiales. L’onglet Web est modernisé, avec un accès direct à YouTube et un repli vers le navigateur système si Qt WebEngine est indisponible.
+
+
+## ZIP d'installation et téléchargement GitHub
+
+Utilisez le **ZIP d'installation QGIS**, qui doit contenir le dossier
+`media_hub/` à sa racine, avec `__init__.py` et `metadata.txt`.
+
+Le bouton **Code → Download ZIP** de GitHub ne convient pas directement :
+GitHub crée un dossier comme `qgis-media-hub-main` ou
+`qgis-media-hub-1.5.1`, que Python ne peut pas importer dans QGIS.
+
+Pour installer les sources manuellement, copiez les fichiers dans un dossier
+`media_hub` situé dans le répertoire `python/plugins` de votre profil QGIS,
+puis redémarrez QGIS.

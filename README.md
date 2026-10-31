@@ -1,4 +1,4 @@
-# Media Hub 1.5.0 — QGIS plugin
+# Media Hub 1.5.1 — QGIS plugin
 
 A clean multimedia dock panel with optional dark mode and French/English interface for **QGIS 3.44.x (Qt5), Windows 64-bit**. Developed and maintained by **[JulienH77](https://github.com/JulienH77)**. Distributed under the [MIT license](LICENSE).
 
@@ -43,14 +43,30 @@ Station tile illustrations are original text-based illustrations for this plugin
 
 ## Release information
 
-Version **1.5.0** adds dark mode, more compact PiP/fullscreen controls, country-specific custom radio stations and bilingual French/English UI while retaining the full feature set from 1.4.0. See the detailed [CHANGELOG](CHANGELOG.md).
+Version **1.5.1** adds dark mode, more compact PiP/fullscreen controls, country-specific custom radio stations and bilingual French/English UI while retaining the full feature set from 1.4.0. See the detailed [CHANGELOG](CHANGELOG.md).
 
 Source code: https://github.com/JulienH77/qgis-media-hub  
 Bugs and feature requests: https://github.com/JulienH77/qgis-media-hub/issues
 
 When reporting a stream problem, provide your QGIS and VLC versions, the station, and whether the same URL plays in standalone VLC. Do not disclose internal network addresses or credentials.
 
-### Updated controls (Media Hub 1.5.0)
+### Updated controls (Media Hub 1.5.1)
 The floating PiP/fullscreen video includes a second, synchronized seek bar with elapsed and total times. Drag the handle to seek. The compact volume control can amplify VLC audio up to 200 percent and supports muting, while the speed field matches the main QGIS player (direct entry, 0.1x to 5.0x, 0.1x steps). These controls can still be hidden with the Show/Hide button or the configurable H shortcut.
 
 Radio stations appear as compact square logos or initials with their full names underneath. The redesigned Web tab keeps the YouTube quick link, bookmarks and external-browser fallback if Qt WebEngine is missing.
+
+
+## Installation ZIP and GitHub source archives
+
+Install the **QGIS plugin ZIP** from the official QGIS plugin directory or a
+release asset. It must have exactly one root directory named `media_hub/`,
+containing `__init__.py` and `metadata.txt`.
+
+**Do not install GitHub's automatic “Code → Download ZIP” source archive directly
+into QGIS.** GitHub wraps the code in a folder such as
+`qgis-media-hub-main` or `qgis-media-hub-1.5.1`, which is not a Python
+package name and triggers `ModuleNotFoundError`.
+
+To install a source checkout manually, copy its files into a folder named
+`media_hub` under the QGIS profile's `python/plugins` directory, then restart
+QGIS. Do not rename the `media_hub` folder.

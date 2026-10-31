@@ -2,11 +2,11 @@
 name=Media Hub
 qgisMinimumVersion=3.44
 qgisMaximumVersion=3.44.99
-version=1.5.0
+version=1.5.1
 author=JulienH77
 email=julien.houziaux77183@gmail.com
 description=Play videos with dark mode and collapsible PiP controls, listen to French and international radio by country, browse the web, and keep notes in QGIS.
-about=Media Hub 1.5.0 is a light multimedia dock for QGIS 3.44 (Qt5) on Windows, developed by JulienH77. Play local videos and direct streams using optional VLC, select audio and subtitle tracks, use Picture-in-Picture, fullscreen, speed and volume controls, and configurable keyboard shortcuts. Dark mode switches the plugin to a dark appearance; hide or restore the floating player's controls in PiP and fullscreen, also with the H shortcut. Browse radio by country: five French stations including RTL and Franceinfo, and up to five popular stations from the Radio Browser directory in other countries. Assign a country to each custom station, and keep older stations safely categorized during migration. International radio lists require Internet access and may be unavailable behind corporate proxies, while last successful lists are cached. Browse with optional Qt WebEngine or your system browser; keep local notes. Experimental release; media codecs and streams depend on system VLC, network access and providers. No bundled VLC binaries or telemetry. MIT license.
+about=Media Hub 1.5.1 is a light multimedia dock for QGIS 3.44 (Qt5) on Windows, developed by JulienH77. Play local videos and direct streams using optional VLC, select audio and subtitle tracks, use Picture-in-Picture, fullscreen, speed and volume controls, and configurable keyboard shortcuts. Dark mode switches the plugin to a dark appearance; hide or restore the floating player's controls in PiP and fullscreen, also with the H shortcut. Browse radio by country: five French stations including RTL and Franceinfo, and up to five popular stations from the Radio Browser directory in other countries. Assign a country to each custom station, and keep older stations safely categorized during migration. International radio lists require Internet access and may be unavailable behind corporate proxies, while last successful lists are cached. Browse with optional Qt WebEngine or your system browser; keep local notes. Experimental release; media codecs and streams depend on system VLC, network access and providers. No bundled VLC binaries or telemetry. MIT license.
 
 category=Web
 tags=video,radio,franceinfo,media,web browser,vlc,youtube,notes,playlist
@@ -17,7 +17,8 @@ hasProcessingProvider=False
 homepage=https://github.com/JulienH77/qgis-media-hub#readme
 tracker=https://github.com/JulienH77/qgis-media-hub/issues
 repository=https://github.com/JulienH77/qgis-media-hub
-changelog=1.5.0 - Dark Mode, International Radio, bilingual UI and player polish (QGIS 3.44):
+changelog=1.5.1 - Fix QGIS ZIP packaging guidance and compatibility warnings. Rename ambiguous C integer alias in VLC backend, modernize dialog execution and PyQt optional-module loading without removing fallback support. No intentional player or radio feature changes.
+    1.5.0 - Dark Mode, International Radio, bilingual UI and player polish (QGIS 3.44):
     VIDEO: Add a Light/Dark mode button and compact PiP/fullscreen controls. Add a second seek bar in PiP and fullscreen, synchronized with the video timeline, with elapsed/total time and drag-to-seek. Redesign volume as a compact VLC-inspired slider with mute button and use the same editable speed field in PiP/fullscreen and the QGIS video dock (0.1x to 5.0x, 0.1x steps). Preserve independently centered playback controls and a collapsible toolbar; add the configurable H shortcut and remember preferences.
     RADIO: Use smaller radio tiles with readable station names beneath each image, including stations without a logo. Use a single France entry with five stations including RTL and Franceinfo; other countries display five popular Radio Browser stations, cached for offline reuse. Custom stations belong to a country selected on creation and are shown only there; legacy saved radios are migrated without losing data. Allow reassignment of a custom station to another country.
     LANGUAGE: Add French and English interface translations and a language selector (Auto / French / English). Automatically follow QGIS language or system language.

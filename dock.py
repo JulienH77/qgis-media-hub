@@ -4,6 +4,7 @@
 Le navigateur et les moteurs multimédias sont chargés à la demande : l'absence
  d'un module optionnel ne doit jamais empêcher le plugin de démarrer.
 """
+import importlib
 import json
 import os
 import shutil
@@ -868,8 +869,16 @@ class MediaHubDock(QDockWidget):
                     from qgis.PyQt.QtMultimedia import QMediaContent, QMediaPlayer as QtMedia
                     from qgis.PyQt.QtMultimediaWidgets import QVideoWidget
                 except ImportError:
-                    from PyQt5.QtMultimedia import QMediaContent, QMediaPlayer as QtMedia
-                    from PyQt5.QtMultimediaWidgets import QVideoWidget
+                    # Some QGIS installations do not expose optional Qt modules
+                    # through qgis.PyQt. Keep a native-binding fallback rather
+                    # than disabling the video decoder on those installations.
+                    from qgis.PyQt.QtCore import PYQT_VERSION_STR
+                    qt_binding = "PyQt6" if PYQT_VERSION_STR.startswith("6.") else "PyQt5"
+                    multimedia = importlib.import_module(qt_binding + ".QtMultimedia")
+                    multimedia_widgets = importlib.import_module(qt_binding + ".QtMultimediaWidgets")
+                    QMediaContent = multimedia.QMediaContent  # Qt5 fallback only
+                    QtMedia = multimedia.QMediaPlayer
+                    QVideoWidget = multimedia_widgets.QVideoWidget
                 self.qt_media_content = QMediaContent
                 self.qt_canvas = QVideoWidget(self.video_holder)
                 self.qt_canvas.installEventFilter(self)
@@ -1637,17 +1646,29 @@ class MediaHubDock(QDockWidget):
         self._web_initialized = True
         try:
             try:
-                from qgis.PyQt.QtWebEngineWidgets import QWebEngineView, QWebEngineSettings
+                from qgis.PyQt.QtWebEngineWidgets import QWebEngineView
+                from qgis.PyQt.QtWebEngineCore import QWebEngineSettings
             except ImportError:
-                from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineSettings
+                # WebEngine is optional and not consistently forwarded by
+                # qgis.PyQt. Resolve the matching Qt binding only on demand.
+                from qgis.PyQt.QtCore import PYQT_VERSION_STR
+                qt_binding = "PyQt6" if PYQT_VERSION_STR.startswith("6.") else "PyQt5"
+                web_widgets = importlib.import_module(qt_binding + ".QtWebEngineWidgets")
+                QWebEngineView = web_widgets.QWebEngineView
+                if qt_binding == "PyQt6":
+                    web_core = importlib.import_module(qt_binding + ".QtWebEngineCore")
+                    QWebEngineSettings = web_core.QWebEngineSettings
+                else:
+                    QWebEngineSettings = web_widgets.QWebEngineSettings
             self.web = QWebEngineView(self.browser_page)
             self.web.setMinimumHeight(250)
             self.web.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             st = self.web.settings()
-            st.setAttribute(QWebEngineSettings.PluginsEnabled, True)
-            st.setAttribute(QWebEngineSettings.JavascriptEnabled, True)
+            web_attribute = getattr(QWebEngineSettings, "WebAttribute", QWebEngineSettings)
+            st.setAttribute(web_attribute.PluginsEnabled, True)
+            st.setAttribute(web_attribute.JavascriptEnabled, True)
             try:
-                st.setAttribute(QWebEngineSettings.FullScreenSupportEnabled, True)
+                st.setAttribute(web_attribute.FullScreenSupportEnabled, True)
             except AttributeError:
                 pass
             self.web.urlChanged.connect(self._web_url_changed)
@@ -2683,7 +2704,7 @@ class MediaHubDock(QDockWidget):
         buttons.rejected.connect(dialog.reject)
         outer.addWidget(buttons)
         apply_localization(dialog)
-        if dialog.exec_() != QDialog.Accepted:
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
         values = {}

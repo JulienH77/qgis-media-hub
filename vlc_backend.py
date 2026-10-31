@@ -147,7 +147,7 @@ class VLCBackend(QObject):
 
     def _setup_functions(self):
         P = ctypes.c_void_p
-        I = ctypes.c_int
+        CInt = ctypes.c_int
         L = ctypes.c_int64
         F = ctypes.c_float
         S = ctypes.c_char_p
@@ -155,7 +155,7 @@ class VLCBackend(QObject):
             fun = getattr(self._dll, name)
             fun.argtypes = argtypes
             fun.restype = restype
-        bind("libvlc_new", P, I, ctypes.POINTER(S))
+        bind("libvlc_new", P, CInt, ctypes.POINTER(S))
         bind("libvlc_release", None, P)
         bind("libvlc_media_player_new", P, P)
         bind("libvlc_media_player_release", None, P)
@@ -164,29 +164,29 @@ class VLCBackend(QObject):
         bind("libvlc_media_release", None, P)
         bind("libvlc_media_player_set_media", None, P, P)
         bind("libvlc_media_player_set_hwnd", None, P, P)
-        bind("libvlc_media_player_play", I, P)
+        bind("libvlc_media_player_play", CInt, P)
         bind("libvlc_media_player_stop", None, P)
-        bind("libvlc_media_player_set_pause", None, P, I)
-        bind("libvlc_media_player_get_state", I, P)
+        bind("libvlc_media_player_set_pause", None, P, CInt)
+        bind("libvlc_media_player_get_state", CInt, P)
         bind("libvlc_media_player_get_time", L, P)
         bind("libvlc_media_player_get_length", L, P)
         bind("libvlc_media_player_set_time", None, P, L)
-        bind("libvlc_media_player_is_seekable", I, P)
-        bind("libvlc_media_player_set_rate", I, P, F)
-        bind("libvlc_audio_set_volume", I, P, I)
-        bind("libvlc_audio_set_mute", None, P, I)
-        bind("libvlc_video_set_mouse_input", None, P, I)
-        bind("libvlc_video_set_key_input", None, P, I)
+        bind("libvlc_media_player_is_seekable", CInt, P)
+        bind("libvlc_media_player_set_rate", CInt, P, F)
+        bind("libvlc_audio_set_volume", CInt, P, CInt)
+        bind("libvlc_audio_set_mute", None, P, CInt)
+        bind("libvlc_video_set_mouse_input", None, P, CInt)
+        bind("libvlc_video_set_key_input", None, P, CInt)
         # LibVLC 3: identifiants de pistes (ne pas confondre avec les index).
         for name, result, arguments in (
             ("libvlc_audio_get_track_description", P, (P,)),
-            ("libvlc_audio_get_track", I, (P,)),
-            ("libvlc_audio_set_track", I, (P, I)),
+            ("libvlc_audio_get_track", CInt, (P,)),
+            ("libvlc_audio_set_track", CInt, (P, CInt)),
             ("libvlc_video_get_spu_description", P, (P,)),
-            ("libvlc_video_get_spu", I, (P,)),
-            ("libvlc_video_set_spu", I, (P, I)),
+            ("libvlc_video_get_spu", CInt, (P,)),
+            ("libvlc_video_set_spu", CInt, (P, CInt)),
             ("libvlc_track_description_list_release", None, (P,)),
-            ("libvlc_media_player_add_slave", I, (P, I, S, I)),
+            ("libvlc_media_player_add_slave", CInt, (P, CInt, S, CInt)),
         ):
             try:
                 bind(name, result, *arguments)
